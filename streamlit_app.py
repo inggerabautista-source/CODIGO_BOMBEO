@@ -20,7 +20,6 @@ import pandas as pd
 import streamlit as st
 
 import matplotlib.pyplot as plt
-matplotlib.use("Agg")
 
 G = 9.81          # m/s2
 NU = 1.01e-6      # viscosidad cinemática agua 20 °C (m2/s)
