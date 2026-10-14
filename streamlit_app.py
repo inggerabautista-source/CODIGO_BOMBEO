@@ -18,7 +18,8 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
-
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 G = 9.81          # m/s2
@@ -138,7 +139,7 @@ def demo_profile():
 def hidraulica(prof, cover, D, Q, eps, C, method, acc, z_dest):
     ch = prof["ch"].to_numpy(float)
     zt = prof["z"].to_numpy(float)
-    zp = zt - cover
+    zp = prof["zp"].to_numpy(float) if "zp" in prof else zt - cover
     Lseg = np.hypot(np.diff(ch), np.diff(zp))
     hfs = np.array([hf_pipe(Q, D, l, eps, C, method) for l in Lseg])
     a = acc.copy()
@@ -247,6 +248,199 @@ def fig_curva_masa(cum):
 
 
 # ----------------------------------------------------------------------------
+# ESQUEMAS (no a escala; las cotas rotuladas SÍ son las calculadas)
+# ----------------------------------------------------------------------------
+from matplotlib.patches import Rectangle
+
+C_AGUA, C_AGUA_U, C_TERR, C_SUELO = "#bcd9ec", "#4a90c4", "#6b4f2a", "#eadfca"
+
+
+def _etiquetas(ax, items, x_line, x_text, yr, fs=6.5):
+    """Rotula niveles evitando que los textos se encimen."""
+    items = sorted(items, key=lambda t: -t[0])
+    gap = 0.06 * yr
+    ypos = []
+    for y, _, _ in items:
+        ypos.append(y if not ypos else min(y, ypos[-1] - gap))
+    for (y, t, c), yp in zip(items, ypos):
+        ax.plot([x_line, x_text - 0.2], [y, yp], color=c, lw=0.6)
+        ax.text(x_text, yp, t, va="center", ha="left", fontsize=fs, color=c)
+
+
+def draw_pozo(ax, d):
+    top, bot = d["z_t"], d["z_bomba"]
+    yr = max(top - bot, 1.0)
+    ax.set_xlim(0, 20)
+    ax.set_ylim(bot - 0.12 * yr, top + 0.12 * yr)
+    ax.axis("off")
+    ax.fill_between([0, 6.8], [top, top], [bot - 0.12 * yr] * 2, color=C_SUELO)
+    ax.plot([0, 6.8], [top, top], color=C_TERR, lw=2)
+    ax.add_patch(Rectangle((4, bot), 2, top - bot + 0.04 * yr, fc="white", ec="k", lw=1.2, zorder=2))
+    ax.add_patch(Rectangle((4, bot), 2, d["z_ne"] - bot, fc=C_AGUA, ec="none", zorder=3))
+    ax.add_patch(Rectangle((4, bot), 2, d["z_nd"] - bot, fc=C_AGUA_U, ec="none", zorder=3))
+    ax.add_patch(Rectangle((4.35, d["z_succ"]), 1.3, 0.10 * yr, fc="gray", ec="k", zorder=4))
+    ax.plot([5, 5], [d["z_succ"] + 0.10 * yr, top + 0.04 * yr], color="k", lw=2.5, zorder=4)
+    _etiquetas(ax, [(top, f"Terreno {top:.2f}", C_TERR),
+                    (d["z_ne"], f"NE {d['z_ne']:.2f}", "#1f77b4"),
+                    (d["z_nd"], f"ND {d['z_nd']:.2f}", "#08519c"),
+                    (d["z_nda"], f"ND + abatim. {d['z_nda']:.2f}", "#08306b"),
+                    (d["z_succ"], f"Succión bomba {d['z_succ']:.2f}", "k"),
+                    (bot, f"Colocación (c/holgura) {bot:.2f}", "gray")], 6, 7.2, yr)
+    ax.set_title("Pozo profundo (corte)", fontsize=9)
+
+
+def draw_carcamo(ax, d):
+    top, bot = d["z_t"], d["z_fondo"]
+    yr = max(top - bot, 1.0)
+    ax.set_xlim(0, 20)
+    ax.set_ylim(bot - 0.12 * yr, top + 0.15 * yr)
+    ax.axis("off")
+    ax.fill_between([0, 9.9], [bot - 0.12 * yr] * 2, [bot] * 2, color=C_SUELO)
+    ax.fill_between([0, 3], [top] * 2, [bot - 0.12 * yr] * 2, color=C_SUELO)
+    ax.fill_between([9, 9.9], [top] * 2, [bot - 0.12 * yr] * 2, color=C_SUELO)
+    ax.plot([0, 3], [top, top], color=C_TERR, lw=2)
+    ax.plot([9, 9.9], [top, top], color=C_TERR, lw=2)
+    ax.add_patch(Rectangle((3, bot), 6, top - bot + 0.05 * yr, fc="white", ec="k", lw=1.5, zorder=2))
+    ax.add_patch(Rectangle((3, bot), 6, d["namino"] - bot, fc=C_AGUA, ec="none", zorder=3))
+    ax.add_patch(Rectangle((3, d["namino"]), 6, d["namo"] - d["namino"], fc=C_AGUA_U, ec="none", zorder=3))
+    ax.add_patch(Rectangle((5.2, bot + 0.01 * yr), 1.2, (d["z_succ"] - bot) + 0.10 * yr, fc="gray", ec="k", zorder=4))
+    ax.plot([5.8, 5.8], [d["z_succ"] + 0.10 * yr, top + 0.05 * yr], color="k", lw=2.5, zorder=4)
+    ax.text(6.0, (d["namino"] + d["namo"]) / 2, "Vol. útil", fontsize=6, ha="left", va="center",
+            color="white", zorder=5)
+    _etiquetas(ax, [(top, f"Terreno {top:.2f}", C_TERR),
+                    (d["name"], f"NAME {d['name']:.2f}", "#b30000"),
+                    (d["namo"], f"NAMO (arranque) {d['namo']:.2f}", "#08519c"),
+                    (d["namino"], f"NAMINO (paro) {d['namino']:.2f}", "#08306b"),
+                    (d["z_succ"], f"Succión bomba {d['z_succ']:.2f}", "k"),
+                    (bot, f"Fondo {bot:.2f}", "gray")], 9, 10.2, yr)
+    ax.set_title("Cárcamo de bombeo (corte)", fontsize=9)
+
+
+def draw_tanque(ax, s):
+    z_t, fo, no, co = s["z_t"], s["fondo"], s["namo"], s["corona"]
+    lo = min(fo, z_t)
+    yr = max(co - lo, 1.0)
+    ax.set_xlim(0, 20)
+    ax.set_ylim(lo - 0.18 * yr, co + 0.22 * yr)
+    ax.axis("off")
+    ax.fill_between([0, 7.5], [z_t] * 2, [lo - 0.18 * yr] * 2, color=C_SUELO)
+    ax.plot([0, 7.5], [z_t, z_t], color=C_TERR, lw=2)
+    elevado = fo > z_t + 0.02 * yr
+    if elevado:
+        for x in (3.4, 6.6):
+            ax.plot([x, x], [z_t, fo], color="k", lw=2.5)
+        ax.plot([3.4, 6.6], [z_t, fo], color="k", lw=0.8)
+        ax.plot([6.6, 3.4], [z_t, fo], color="k", lw=0.8)
+        ax.text(0.2, (z_t + fo) / 2, f"Torre\n{fo - z_t:.1f} m", fontsize=6.5, va="center")
+    ax.add_patch(Rectangle((3, fo), 4, co - fo, fc="white", ec="k", lw=1.5, zorder=3))
+    ax.add_patch(Rectangle((3, fo), 4, no - fo, fc=C_AGUA_U, ec="none", zorder=4))
+    if s.get("recibe"):
+        ax.annotate("Llegada\nde la línea", xy=(3.0, no + 0.05 * yr), xytext=(0.1, co + 0.10 * yr),
+                    fontsize=6.5, arrowprops=dict(arrowstyle="->", color="navy"), color="navy")
+    items = [(co, f"Corona {co:.2f}", "#b30000"), (no, f"NAMO {no:.2f}", "#08519c"),
+             (fo, f"Fondo = NAMIN {fo:.2f}", "#08306b")]
+    if abs(z_t - fo) > 0.05 * yr:
+        items.append((z_t, f"Terreno {z_t:.2f}", C_TERR))
+    _etiquetas(ax, items, 7, 8.2, yr)
+    ax.set_title(s["nombre"], fontsize=9)
+
+
+def fig_pozo(d):
+    fig, ax = plt.subplots(figsize=(4.4, 4.0))
+    draw_pozo(ax, d)
+    fig.tight_layout()
+    return fig
+
+
+def fig_carcamo(d):
+    fig, ax = plt.subplots(figsize=(4.4, 4.0))
+    draw_carcamo(ax, d)
+    fig.tight_layout()
+    return fig
+
+
+def fig_tanques(estr):
+    n = len(estr)
+    fig, axs = plt.subplots(1, n, figsize=(4.4 * n, 4.0))
+    axs = np.atleast_1d(axs)
+    for ax, s_ in zip(axs, estr):
+        draw_tanque(ax, s_)
+    fig.tight_layout()
+    return fig
+
+
+def fig_descarga(destino, llega_en, h):
+    """Croquis pequeño: qué altura capturar en el punto de descarga."""
+    fig, ax = plt.subplots(figsize=(4.2, 2.8))
+    ax.set_xlim(0, 10)
+    ax.set_ylim(-2.4, 7.6)
+    ax.axis("off")
+    ax.fill_between([0, 10], [0, 0], [-2.4, -2.4], color=C_SUELO)
+    ax.plot([0, 10], [0, 0], color=C_TERR, lw=2)
+    ax.text(6.9, -0.75, "Terreno final", fontsize=6.5, color=C_TERR)
+    elevado = destino == "Tanque elevado" or (destino == "Cisterna + tanque elevado" and llega_en == "Tanque elevado")
+    cist = destino == "Cisterna" or (destino == "Cisterna + tanque elevado" and llega_en == "Cisterna")
+    if elevado:
+        for x in (3.8, 6.2):
+            ax.plot([x, x], [0, 3.4], color="k", lw=2.5)
+        ax.add_patch(Rectangle((3.2, 3.4), 3.6, 2.4, fc="white", ec="k", lw=1.5))
+        ax.add_patch(Rectangle((3.2, 3.4), 3.6, 2.0, fc=C_AGUA_U, ec="none"))
+        y_n, lab = 5.4, "h = torre + tirante"
+        ax.annotate("", xy=(2.6, 3.4), xytext=(2.6, 0), arrowprops=dict(arrowstyle="<->", color="gray"))
+        ax.text(0.2, 1.6, "torre", fontsize=6.5, color="gray")
+        y_in = 5.9
+    elif cist:
+        ax.add_patch(Rectangle((3.2, -1.9), 3.6, 3.0, fc="white", ec="k", lw=1.5, zorder=3))
+        ax.add_patch(Rectangle((3.2, -1.9), 3.6, 2.5, fc=C_AGUA_U, ec="none", zorder=4))
+        y_n, lab = 0.6, "h (≈ 0 si el agua\nllega al nivel del terreno)"
+        y_in = 1.3
+    else:
+        ax.add_patch(Rectangle((3.2, 0), 3.6, 3.4, fc="white", ec="k", lw=1.5, zorder=3))
+        ax.add_patch(Rectangle((3.2, 0), 3.6, 2.9, fc=C_AGUA_U, ec="none", zorder=4))
+        y_n, lab = 2.9, "h ≈ tirante máx."
+        y_in = 3.7
+    ax.plot([0.2, 2.2, 2.2, 3.6], [-0.6, -0.6, y_in, y_in], color="navy", lw=2, zorder=5)
+    ax.annotate("", xy=(3.6, y_in), xytext=(3.3, y_in), arrowprops=dict(arrowstyle="->", color="navy"), zorder=5)
+    ax.text(0.2, -1.3, "Línea de conducción", fontsize=6.5, color="navy")
+    ax.plot([6.8, 8.4], [y_n, y_n], color="red", ls="--", lw=1)
+    ax.annotate("", xy=(8.2, y_n), xytext=(8.2, 0), arrowprops=dict(arrowstyle="<->", color="red", lw=1.4))
+    ax.text(8.35, y_n / 2 if y_n > 1 else y_n + 0.5, lab, fontsize=7, color="red", va="center")
+    ax.text(6.9, y_n + 0.15, "NAMO", fontsize=6.5, color="red")
+    ax.set_title(f"Altura de descarga h  (valor actual: {h:.1f} m)", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def fig_sistema(fd, res, estr):
+    n = 2 + len(estr)
+    fig, axs = plt.subplots(1, n, figsize=(4.0 * n + 2.0, 4.8),
+                            gridspec_kw={"width_ratios": [1.0, 1.9] + [1.0] * len(estr)})
+    (draw_pozo if fd["tipo"] == "pozo" else draw_carcamo)(axs[0], fd)
+    ax = axs[1]
+    ch = res["ch"]
+    ax.plot(ch, res["zt"], color=C_TERR, ls="--", lw=1, label="Terreno")
+    ax.plot(ch, res["zp"], color="navy", lw=1.8, label="Tubería")
+    ax.plot(ch, res["LE"], color="red", ls="--", lw=1.3, label="Línea de energía")
+    i_hi = int(np.argmax(res["zp"]))
+    ax.scatter([ch[0], ch[i_hi], ch[-1]], [res["zp"][0], res["zp"][i_hi], res["zp"][-1]], color="navy", zorder=5)
+    ax.annotate(f"Inicio tubería {res['zp'][0]:.2f}\nLE en bomba {res['LE'][0]:.2f}", (ch[0], res["LE"][0]),
+                textcoords="offset points", xytext=(6, -38), fontsize=7, color="red")
+    ax.annotate(f"Punto más alto {res['zp'][i_hi]:.2f}\n(cad. {ch[i_hi]:.0f} m)", (ch[i_hi], res["zp"][i_hi]),
+                textcoords="offset points", xytext=(-12, 14), fontsize=7, color="navy", ha="right")
+    ax.annotate(f"Fin tubería {res['zp'][-1]:.2f}\nLE llegada {res['LE'][-1]:.2f}", (ch[-1], res["zp"][-1]),
+                textcoords="offset points", xytext=(-100, -46), fontsize=7, color="navy")
+    ax.set_xlabel("Cadenamiento (m)")
+    ax.set_ylabel("Cota (msnm)")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=7, loc="lower right")
+    ax.set_title("Línea de conducción", fontsize=9)
+    for a_, s_ in zip(axs[2:], estr):
+        draw_tanque(a_, s_)
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------------------------------------------------------------
 # EXPORTACIÓN
 # ----------------------------------------------------------------------------
 def build_excel(sheets):
@@ -323,7 +517,6 @@ with tabs[0]:
         proyecto = st.text_input("Nombre del proyecto", "Línea de bombeo - Ejemplo")
         fuente = st.selectbox("Tipo de fuente de abastecimiento", list(EQUIPOS))
         equipo = st.selectbox("Tipo de equipo de bombeo", EQUIPOS[fuente])
-        Qlps = st.number_input("Caudal a bombear Qb (l/s)", 1.0, 5000.0, 20.0, 0.5)
     with c2:
         T = st.number_input("Horas de bombeo al día", 1.0, 24.0, 20.0, 0.5)
         h0 = st.number_input("Hora de arranque (0-23)", 0, 23, 4)
@@ -333,12 +526,70 @@ with tabs[0]:
     with c3:
         destino = st.selectbox("Destino", ["Tanque de regulación superficial (piso)", "Tanque elevado",
                                            "Cisterna", "Cisterna + tanque elevado"])
+        llega_en = {"Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}.get(destino, "Tanque de piso")
+        if destino == "Cisterna + tanque elevado":
+            llega_en = st.selectbox("La línea de conducción descarga en:", ["Tanque elevado", "Cisterna"])
         h_llegada = st.number_input(
-            "Carga de llegada: nivel del agua en el punto de descarga sobre el terreno final (m)\n"
-            "(piso: altura de descarga; elevado: torre + tirante)", 0.0, 80.0, 4.0, 0.5)
+            "Altura de descarga h: nivel MÁXIMO del agua sobre el terreno final (m) — ver croquis", 0.0, 80.0, 4.0, 0.5)
         cover = st.number_input("Profundidad de colocación de tubería (m)", 0.0, 5.0, 1.0, 0.1)
         v_min = st.number_input("Velocidad mínima recomendada (m/s)", 0.1, 2.0, 0.6, 0.1)
         v_max = st.number_input("Velocidad máxima recomendada (m/s)", 0.5, 5.0, 2.0, 0.1)
+
+    st.markdown("---")
+    cA, cB = st.columns([1.7, 1])
+    with cA:
+        st.markdown("#### Caudales de diseño")
+        MODOS = ["Población y dotación", "Conozco Qmed", "Conozco el caudal de bombeo Qb"]
+        modo_q = st.radio("¿Cómo definir el caudal?", MODOS, horizontal=True)
+        modo = MODOS.index(modo_q)
+        k1, k2 = st.columns(2)
+        dot = pob = None
+        if modo == 0:
+            dot = k1.number_input("Dotación (l/hab/día)", 20, 1000, 150, 5)
+            pob = k2.number_input("Población de proyecto (hab)", 1, 5000000, 6000, 100)
+            Qmed_in = pob * dot / 86400.0
+        elif modo == 1:
+            Qmed_in = k1.number_input("Qmed (l/s)", 0.1, 5000.0, 10.4, 0.1)
+        else:
+            Qb_in = k1.number_input("Qb, caudal a bombear (l/s)", 0.1, 5000.0, 20.0, 0.5)
+        k3, k4 = st.columns(2)
+        CVd = k3.number_input("Coeficiente de variación diaria CVd", 1.0, 2.5, 1.20, 0.01)
+        CVh = k4.number_input("Coeficiente de variación horaria CVh", 1.0, 4.0, 1.50, 0.01)
+        if modo in (0, 1):
+            Qmed = Qmed_in
+            Qmd = Qmed * CVd
+            Qlps = Qmd * 24.0 / T
+        else:
+            Qlps = Qb_in
+            Qmd = Qlps * T / 24.0
+            Qmed = Qmd / CVd
+        Qmh = Qmed * CVh
+        Qlps = max(Qlps, 0.1)
+        tq_q = pd.DataFrame([
+            ["Qmed", round(Qmed, 3), "Gasto medio diario (Pob × Dot / 86 400)" if modo == 0 else "Gasto medio diario"],
+            ["Qmd = Qmed × CVd", round(Qmd, 3),
+             "Obra de captación, línea de conducción (hasta el tanque) y tanque de regulación"],
+            ["Qmh = Qmed × CVh", round(Qmh, 3), "Línea de alimentación a la red y red de distribución"],
+            ["Qb = Qmd × 24 / T", round(Qlps, 3), "Caudal de bombeo: equipo, columna/succión y línea de conducción"],
+        ], columns=["Caudal", "l/s", "Se usa para diseñar"])
+        st.dataframe(tq_q, width="stretch", hide_index=True)
+        if Qlps > 0 and T < 24:
+            st.caption(f"Bombeando {T:g} h/día el equipo debe entregar Qb = Qmd·24/T = {Qlps:.2f} l/s para cubrir Qmd.")
+    with cB:
+        st.markdown("#### ¿Qué altura capturar en la descarga?")
+        figd = fig_descarga(destino, llega_en, h_llegada)
+        st.pyplot(figd)
+        plt.close(figd)
+        st.caption("h = distancia vertical entre el terreno en el último punto del perfil y el nivel máximo del "
+                   "agua (NAMO) al que descarga la línea. Piso: ≈ tirante; elevado: torre + tirante; "
+                   "cisterna: ≈ 0 si el agua llega al nivel del terreno.")
+    if modo == 0:
+        add("Datos", "Dotación", dot, "l/hab/día")
+        add("Datos", "Población de proyecto", pob, "hab")
+    add("Datos", "Qmed", float(Qmed), "l/s")
+    add("Datos", "CVd / CVh", f"{CVd} / {CVh}")
+    add("Datos", "Qmd (captación, conducción, regulación)", float(Qmd), "l/s")
+    add("Datos", "Qmh (alimentación a red y red)", float(Qmh), "l/s")
 Q = Qlps / 1000.0
 
 # ------------------------------------------------------------------ 2 PERFIL
@@ -348,21 +599,51 @@ with tabs[1]:
     plantilla = demo_profile().rename(columns={"ch": "Cadenamiento", "z": "Cota"})
     st.download_button("Descargar plantilla CSV", plantilla.to_csv(index=False).encode("utf-8"),
                        "plantilla_perfil.csv")
-    up = st.file_uploader("Perfil", type=["csv", "xlsx", "xls"])
+    up = st.file_uploader("Perfil del TERRENO", type=["csv", "xlsx", "xls"], key="up_terreno")
     if up is not None:
-        prof = read_profile(up)
+        terr = read_profile(up)
     else:
         st.info("Usando perfil de ejemplo hasta que subas tu archivo.")
-        prof = demo_profile()
-    st.dataframe(prof.rename(columns={"ch": "Cadenamiento (m)", "z": "Cota terreno (msnm)"}),
-                 height=200)
+        terr = demo_profile()
+    with st.expander("Opcional: perfil de la TUBERÍA (si ya lo tienes en el mismo formato)"):
+        st.caption("Mismo formato que el terreno: Cadenamiento y Cota de tubería (rasante/eje). "
+                   "Los cadenamientos pueden ser distintos a los del terreno; se interpolan. "
+                   "Si no lo cargas, la tubería = terreno − profundidad de colocación.")
+        up_p = st.file_uploader("Perfil de la TUBERÍA", type=["csv", "xlsx", "xls"], key="up_tuberia")
+    if up_p is not None:
+        pp = read_profile(up_p)
+        lo_, hi_ = float(terr["ch"].min()), float(terr["ch"].max())
+        ch_all = np.union1d(terr["ch"].to_numpy(float), pp["ch"].to_numpy(float))
+        ch_all = ch_all[(ch_all >= lo_) & (ch_all <= hi_)]
+        prof = pd.DataFrame({"ch": ch_all,
+                             "z": np.round(np.interp(ch_all, terr["ch"], terr["z"]), 3),
+                             "zp": np.round(np.interp(ch_all, pp["ch"], pp["z"]), 3)})
+        if pp["ch"].min() > lo_ + 0.5 or pp["ch"].max() < hi_ - 0.5:
+            st.warning("El perfil de tubería no cubre todo el cadenamiento del terreno; "
+                       "los extremos se completan con el valor más cercano.")
+        cob = prof["z"] - prof["zp"]
+        st.write(f"Tubería cargada por el usuario. Profundidad (terreno − tubería): "
+                 f"mín **{cob.min():.2f} m**, máx **{cob.max():.2f} m**.")
+        if cob.min() < 0:
+            st.error("En algún punto la tubería queda por encima del terreno; revisa el archivo.")
+            ALERTAS.append("El perfil de tubería cargado queda por encima del terreno en algún tramo.")
+        add("Datos", "Perfil de tubería", "Cargado por el usuario")
+    else:
+        prof = terr.copy()
+        prof["zp"] = prof["z"] - cover
+        add("Datos", "Perfil de tubería", f"Terreno − {cover} m")
+    st.dataframe(prof.rename(columns={"ch": "Cadenamiento (m)", "z": "Cota terreno (msnm)",
+                                      "zp": "Cota tubería (msnm)"}), height=200)
     fp, axp = plt.subplots(figsize=(11, 3))
-    axp.plot(prof["ch"], prof["z"], color="saddlebrown")
+    axp.plot(prof["ch"], prof["z"], color="saddlebrown", label="Terreno")
+    axp.plot(prof["ch"], prof["zp"], color="navy", ls="--", label="Tubería")
     axp.fill_between(prof["ch"], prof["z"], prof["z"].min() - 5, color="burlywood", alpha=0.3)
     axp.set_xlabel("Cadenamiento (m)")
     axp.set_ylabel("Cota (msnm)")
     axp.grid(alpha=0.3)
+    axp.legend(fontsize=8)
     st.pyplot(fp)
+    plt.close(fp)
 
 z_ground0 = float(prof["z"].iloc[0])
 z_end = float(prof["z"].iloc[-1])
@@ -461,6 +742,23 @@ with tabs[5]:
         add("Pozo profundo", "Profundidad de colocación de bomba", prof_bomba, "m")
         add("Pozo profundo", "Pérdida en columna", h_col, "m")
         add("Pozo profundo", "Diámetro de columna", d_col, "mm")
+        z_t = z_ground0
+        FUENTE_D = dict(tipo="pozo", z_t=z_t, z_ne=z_t - ne, z_nd=z_t - nd, z_nda=z_t - nd - abat,
+                        z_succ=z_t - (nd + abat + s_min), z_bomba=z_t - prof_bomba)
+        NIV_FUENTE = [
+            ("Terreno en el pozo", z_t, "Cota de terreno (inicio del perfil)"),
+            ("Nivel estático (NE)", FUENTE_D["z_ne"], f"{ne:.1f} m bajo terreno"),
+            ("Nivel dinámico (ND) a Qb", FUENTE_D["z_nd"], f"{nd:.1f} m bajo terreno"),
+            ("ND + abatimiento adicional", FUENTE_D["z_nda"], f"{nd + abat:.1f} m bajo terreno"),
+            ("Succión de la bomba", FUENTE_D["z_succ"], f"ND + abatim. + sumergencia = {nd + abat + s_min:.1f} m"),
+            ("Profundidad de colocación (incl. holgura)", FUENTE_D["z_bomba"], f"{prof_bomba:.1f} m bajo terreno"),
+        ]
+        cf1, cf2 = st.columns(2)
+        figf = fig_pozo(FUENTE_D)
+        cf1.pyplot(figf)
+        plt.close(figf)
+        cf2.dataframe(pd.DataFrame(NIV_FUENTE, columns=["Elemento", "Cota (msnm)", "Referencia"]).round(2),
+                      hide_index=True, width="stretch")
     else:
         c1, c2 = st.columns(2)
         with c1:
@@ -503,12 +801,28 @@ with tabs[5]:
                         ("Cota NAMINO (paro)", namino, "msnm"), ("Cota NAMO (arranque)", namo, "msnm"),
                         ("Cota NAME", name_, "msnm")]:
             add("Cárcamo", k, v, u)
+        FUENTE_D = dict(tipo="carcamo", z_t=z_ground0, z_fondo=z_fondo, z_succ=z_fondo + C_fondo,
+                        namino=namino, namo=namo, name=name_)
+        NIV_FUENTE = [
+            ("Terreno en el cárcamo", z_ground0, "Cota de terreno (inicio del perfil)"),
+            ("NAME (nivel de aguas máximas extraordinarias)", name_, f"NAMO + {margen:.2f} m"),
+            ("NAMO (arranque de bomba)", namo, f"NAMINO + {h_util:.2f} m (volumen útil)"),
+            ("NAMINO (paro de bomba)", namino, f"Fondo + holgura + sumergencia = {C_fondo + S:.2f} m"),
+            ("Succión de la bomba", z_fondo + C_fondo, f"Fondo + {C_fondo:.2f} m"),
+            ("Fondo del cárcamo", z_fondo, f"{prof_carc:.1f} m bajo terreno"),
+        ]
+        cf1, cf2 = st.columns(2)
+        figf = fig_carcamo(FUENTE_D)
+        cf1.pyplot(figf)
+        plt.close(figf)
+        cf2.dataframe(pd.DataFrame(NIV_FUENTE, columns=["Elemento", "Cota (msnm)", "Referencia"]).round(2),
+                      hide_index=True, width="stretch")
     add("Bombeo", "Diámetro succión (v≤1.5 m/s)", D_succ, "mm")
     add("Bombeo", "Diámetro descarga bomba (v≤3 m/s)", D_desc, "mm")
 
 # ------------------------------------------------------------------ 4 ACCESORIOS
 # puntos altos/bajos
-zp_tmp = prof["z"].to_numpy(float) - cover
+zp_tmp = prof["zp"].to_numpy(float)
 hi, lo = puntos_alto_bajo(zp_tmp)
 ch_arr = prof["ch"].to_numpy(float)
 
@@ -667,8 +981,7 @@ with tabs[4]:
 
 # ------------------------------------------------------------------ 7 TANQUES
 with tabs[6]:
-    Qmd = Qlps * T / 24.0
-    st.write(f"Gasto medio diario abastecido Qmd = Qb·T/24 = **{Qmd:.2f} l/s**")
+    st.write(f"Qmd (definido en la pestaña Datos; con él se diseña el tanque de regulación) = **{Qmd:.2f} l/s**")
     met = st.radio("Método de regulación", ["Coeficiente de regulación (MAPAS, 24 h)", "Curva masa (patrón editable)"])
     if T < 24 and met.startswith("Coef"):
         st.warning("El coeficiente 14.58 corresponde a bombeo continuo 24 h; para menos horas usa curva masa.")
@@ -728,6 +1041,92 @@ with tabs[6]:
             "definir según lineamientos del organismo operador.")
     SHEETS["Tanques"] = tdf
 
+    # ---------------- niveles de las estructuras
+    st.markdown("#### Niveles de las estructuras de almacenamiento")
+    bordo = st.number_input("Bordo libre (m)", 0.2, 2.0, 0.5, 0.1)
+
+    def estr_(nombre, namo, z_t, recibe=False):
+        return dict(nombre=nombre, z_t=z_t, fondo=namo - h_tq, namin=namo - h_tq, namo=namo,
+                    corona=namo + bordo, recibe=recibe)
+
+    ESTR = []
+    if destino != "Cisterna + tanque elevado":
+        nm = {"Tanque de regulación superficial (piso)": "Tanque de regulación (piso)",
+              "Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}[destino]
+        ESTR.append(estr_(nm, z_dest, z_end, True))
+    else:
+        ESTR.append(estr_(llega_en, z_dest, z_end, True))
+        otro = "Cisterna" if llega_en == "Tanque elevado" else "Tanque elevado"
+        if otro == "Cisterna":
+            prof_ci = st.number_input("Profundidad del fondo de la cisterna bajo el terreno (m)", 0.0, 15.0,
+                                      float(h_tq), 0.5)
+            ESTR.append(estr_("Cisterna", z_end - prof_ci + h_tq, z_end))
+        else:
+            torre = st.number_input("Altura del fondo del tanque elevado sobre el terreno (m)", 0.0, 60.0, 12.0, 1.0)
+            ESTR.append(estr_("Tanque elevado", z_end + torre + h_tq, z_end))
+        st.caption("La línea descarga en la primera estructura; la segunda se ubica en el mismo sitio. "
+                   "El rebombeo entre ambas no se calcula en esta app.")
+    cn1, cn2 = st.columns([1.2, 1])
+    fig_t = fig_tanques(ESTR)
+    cn1.pyplot(fig_t)
+    FIGS.append(("Figura. Niveles de las estructuras de almacenamiento.", fig_t))
+    ndf = pd.DataFrame([[e["nombre"], e["fondo"], e["namo"], e["corona"], e["fondo"] - e["z_t"]] for e in ESTR],
+                       columns=["Estructura", "Fondo = NAMIN (msnm)", "NAMO (msnm)", "Corona (msnm)",
+                                "Fondo sobre(+)/bajo(−) terreno (m)"]).round(2)
+    cn2.dataframe(ndf, hide_index=True, width="stretch")
+    for e in ESTR:
+        rel = e["fondo"] - e["z_t"]
+        if rel > 0.05:
+            cn2.caption(f"{e['nombre']}: fondo a {rel:.1f} m sobre el terreno (torre o base).")
+        elif rel < -0.05:
+            cn2.caption(f"{e['nombre']}: semienterrado, fondo {abs(rel):.1f} m bajo el terreno.")
+    SHEETS["Niveles_tanques"] = ndf
+
+    # ---------------- alimentación a la red
+    st.markdown("#### Alimentación a la red (se diseña con Qmh)")
+    st.write(f"Qmh = **{Qmh:.2f} l/s**. La línea de alimentación y la red quedan fuera del alcance de esta "
+             "memoria; se da un diámetro orientativo.")
+    dq = pd.DataFrame([[v_, round(math.sqrt(4 * Qmh / 1000 / (math.pi * v_)) * 1000),
+                        commercial_up(math.sqrt(4 * Qmh / 1000 / (math.pi * v_)) * 1000)] for v_ in (1.0, 1.5, 2.0)],
+                      columns=["Velocidad (m/s)", "Ø teórico (mm)", "DN comercial ≥ (mm)"])
+    st.dataframe(dq, hide_index=True)
+    add("Tanques", "Qmh (alimentación a red)", float(Qmh), "l/s")
+
+# ------------------------------------------------------------------ 5b ESQUEMA GENERAL Y NIVELES
+with tabs[4]:
+    st.markdown("---")
+    st.subheader("Esquema general de niveles (no a escala; las cotas rotuladas son las calculadas)")
+    fsys = fig_sistema(FUENTE_D, res, ESTR)
+    st.pyplot(fsys)
+    FIGS.append(("Figura 3. Esquema general de niveles: fuente, línea de conducción y destino.", fsys))
+    i_hi = int(np.argmax(res["zp"]))
+    i_lo = int(np.argmin(res["zp"]))
+    NIV = [("Fuente", e_, c_, r_) for e_, c_, r_ in NIV_FUENTE]
+    NIV += [
+        ("Bombeo", "Cabezal de descarga (inicio de la tubería)", res["zp"][0], "Cota de tubería al inicio del perfil"),
+        ("Bombeo", "Energía entregada por la bomba (nivel mín. fuente + CDT máx.)", z_low + TDH_max,
+         f"{z_low:.2f} + {TDH_max:.2f} m"),
+        ("Bombeo", "Línea de energía a la descarga (tras columna/succión)", res["H0"], "Inicio de la línea de conducción"),
+        ("Línea", "Punto más alto de la tubería", res["zp"][i_hi], f"Cad. {res['ch'][i_hi]:.0f} m"),
+        ("Línea", "Línea de energía en el punto más alto", res["LE"][i_hi],
+         f"Presión de operación {res['P'][i_hi]:.1f} m.c.a."),
+        ("Línea", "Punto más bajo de la tubería", res["zp"][i_lo], f"Cad. {res['ch'][i_lo]:.0f} m"),
+        ("Línea", "Fin de la tubería (llegada)", res["zp"][-1], f"Cad. {res['ch'][-1]:.0f} m"),
+        ("Destino", "Terreno en el punto final", z_end, "Último punto del perfil"),
+        ("Destino", "Nivel máximo de descarga (NAMO de la estructura receptora)", z_dest, f"Terreno + h = {h_llegada:.1f} m"),
+    ]
+    for e in ESTR:
+        NIV += [("Destino", f"{e['nombre']}: fondo = NAMIN", e["fondo"], f"{e['fondo'] - e['z_t']:+.2f} m respecto al terreno"),
+                ("Destino", f"{e['nombre']}: NAMO", e["namo"], f"Tirante útil {h_tq:.2f} m"),
+                ("Destino", f"{e['nombre']}: corona", e["corona"], f"NAMO + bordo libre {bordo:.2f} m")]
+    nivdf = pd.DataFrame(NIV, columns=["Grupo", "Elemento", "Cota (msnm)", "Referencia"])
+    nivdf["Cota (msnm)"] = nivdf["Cota (msnm)"].astype(float).round(2)
+    st.subheader("Tabla de niveles de la instalación")
+    st.dataframe(nivdf, hide_index=True, width="stretch")
+    SHEETS["Niveles"] = nivdf
+    for _, r_ in nivdf.iterrows():
+        add("Niveles: " + r_["Grupo"], r_["Elemento"], float(r_["Cota (msnm)"]), "msnm")
+
 # ------------------------------------------------------------------ 8 EXPORTAR
 with tabs[7]:
     resumen = pd.DataFrame(RES, columns=["Sección", "Concepto", "Valor", "Unidad"])
@@ -736,7 +1135,8 @@ with tabs[7]:
     if ALERTAS:
         st.warning("**Alertas:**\n\n" + "\n".join(f"- {a}" for a in dict.fromkeys(ALERTAS)))
     SHEETS = {"Resumen": resumen, **SHEETS}
-    SHEETS["Perfil_entrada"] = prof.rename(columns={"ch": "Cadenamiento (m)", "z": "Cota (msnm)"})
+    SHEETS["Perfil_entrada"] = prof.rename(columns={"ch": "Cadenamiento (m)", "z": "Cota terreno (msnm)",
+                                                 "zp": "Cota tubería (msnm)"})
     SHEETS["Accesorios_tabla"] = acc
     c1, c2, c3 = st.columns(3)
     c1.download_button("Descargar Excel", build_excel(SHEETS), "memoria_bombeo.xlsx",
