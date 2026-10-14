@@ -369,7 +369,7 @@ def fig_tanques(estr):
     return fig
 
 
-def fig_descarga(destino, llega_en, h):
+def fig_descarga(destino, llega_en, h, cist_piso=False):
     """Croquis pequeño: qué altura capturar en el punto de descarga."""
     fig, ax = plt.subplots(figsize=(4.2, 2.8))
     ax.set_xlim(0, 10)
@@ -389,7 +389,7 @@ def fig_descarga(destino, llega_en, h):
         ax.annotate("", xy=(2.6, 3.4), xytext=(2.6, 0), arrowprops=dict(arrowstyle="<->", color="gray"))
         ax.text(0.2, 1.6, "torre", fontsize=6.5, color="gray")
         y_in = 5.9
-    elif cist:
+    elif cist and not cist_piso:
         ax.add_patch(Rectangle((3.2, -1.9), 3.6, 3.0, fc="white", ec="k", lw=1.5, zorder=3))
         ax.add_patch(Rectangle((3.2, -1.9), 3.6, 2.5, fc=C_AGUA_U, ec="none", zorder=4))
         y_n, lab = 0.6, "h (≈ 0 si el agua\nllega al nivel del terreno)"
@@ -456,7 +456,7 @@ def build_excel(sheets):
     return buf.getvalue()
 
 
-def build_docx(resumen, alertas, figs, titulo):
+def build_docx(resumen, alertas, figs, titulo, tablas=None, parrafos=None):
     from docx import Document
     from docx.shared import Inches
     doc = Document()
@@ -475,6 +475,20 @@ def build_docx(resumen, alertas, figs, titulo):
         for _, r in sub.iterrows():
             c = t.add_row().cells
             c[0].text, c[1].text, c[2].text = str(r["Concepto"]), str(r["Valor"]), str(r["Unidad"])
+    if parrafos:
+        doc.add_heading("Descripción de las estructuras de almacenamiento", 1)
+        for t_ in parrafos:
+            doc.add_paragraph(t_)
+    for ttl, dfx in (tablas or []):
+        doc.add_heading(ttl, 1)
+        tb = doc.add_table(rows=1, cols=len(dfx.columns))
+        tb.style = "Light Grid Accent 1"
+        for i, h in enumerate(dfx.columns):
+            tb.rows[0].cells[i].text = str(h)
+        for _, r in dfx.iterrows():
+            cc = tb.add_row().cells
+            for i, v in enumerate(r):
+                cc[i].text = str(v)
     doc.add_heading("Alertas y observaciones", 1)
     for a in alertas or ["Sin alertas."]:
         doc.add_paragraph(a, style="List Bullet")
@@ -501,6 +515,8 @@ RES = []          # (sección, concepto, valor, unidad)
 ALERTAS = []
 SHEETS = {}
 FIGS = []
+TABLAS_DOC = []     # (título, DataFrame) extra para la memoria Word
+PARRAFOS_DOC = []   # párrafos descriptivos para la memoria Word
 
 
 def add(sec, name, val, unit=""):
@@ -529,6 +545,14 @@ with tabs[0]:
         llega_en = {"Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}.get(destino, "Tanque de piso")
         if destino == "Cisterna + tanque elevado":
             llega_en = st.selectbox("La línea de conducción descarga en:", ["Tanque elevado", "Cisterna"])
+        cist_piso = False
+        if "Cisterna" in destino:
+            cist_tipo = st.selectbox("Tipo de construcción de la cisterna",
+                                     ["Enterrada / semienterrada (con excavación)",
+                                      "Sobre el terreno, tipo tanque de piso (sin excavación)"])
+            cist_piso = cist_tipo.startswith("Sobre")
+            add("Datos", "Tipo de construcción de la cisterna", cist_tipo)
+        cist_recibe_piso = cist_piso and llega_en == "Cisterna"
         h_llegada = st.number_input(
             "Altura de descarga h: nivel MÁXIMO del agua sobre el terreno final (m) — ver croquis", 0.0, 80.0, 4.0, 0.5)
         cover = st.number_input("Profundidad de colocación de tubería (m)", 0.0, 5.0, 1.0, 0.1)
@@ -563,13 +587,13 @@ with tabs[0]:
             Qlps = Qb_in
             Qmd = Qlps * T / 24.0
             Qmed = Qmd / CVd
-        Qmh = Qmed * CVh
+        Qmh = Qmd * CVh          # MAPAS: Qmh = Qmd × CVh
         Qlps = max(Qlps, 0.1)
         tq_q = pd.DataFrame([
             ["Qmed", round(Qmed, 3), "Gasto medio diario (Pob × Dot / 86 400)" if modo == 0 else "Gasto medio diario"],
             ["Qmd = Qmed × CVd", round(Qmd, 3),
              "Obra de captación, línea de conducción (hasta el tanque) y tanque de regulación"],
-            ["Qmh = Qmed × CVh", round(Qmh, 3), "Línea de alimentación a la red y red de distribución"],
+            ["Qmh = Qmd × CVh", round(Qmh, 3), "Línea de alimentación a la red y red de distribución"],
             ["Qb = Qmd × 24 / T", round(Qlps, 3), "Caudal de bombeo: equipo, columna/succión y línea de conducción"],
         ], columns=["Caudal", "l/s", "Se usa para diseñar"])
         st.dataframe(tq_q, width="stretch", hide_index=True)
@@ -577,12 +601,13 @@ with tabs[0]:
             st.caption(f"Bombeando {T:g} h/día el equipo debe entregar Qb = Qmd·24/T = {Qlps:.2f} l/s para cubrir Qmd.")
     with cB:
         st.markdown("#### ¿Qué altura capturar en la descarga?")
-        figd = fig_descarga(destino, llega_en, h_llegada)
+        figd = fig_descarga(destino, llega_en, h_llegada, cist_piso)
         st.pyplot(figd)
         plt.close(figd)
         st.caption("h = distancia vertical entre el terreno en el último punto del perfil y el nivel máximo del "
                    "agua (NAMO) al que descarga la línea. Piso: ≈ tirante; elevado: torre + tirante; "
-                   "cisterna: ≈ 0 si el agua llega al nivel del terreno.")
+                   "cisterna enterrada: ≈ 0 si el agua llega al nivel del terreno; cisterna sobre el terreno (tipo piso, "
+                   "sin excavación): ≈ tirante.")
     if modo == 0:
         add("Datos", "Dotación", dot, "l/hab/día")
         add("Datos", "Población de proyecto", pob, "hab")
@@ -769,11 +794,16 @@ with tabs[5]:
                                  float(tciclo_def), 0.5)
         with c2:
             h_succ = st.number_input("Pérdidas en succión y piezas especiales de la estación (m)", 0.0, 10.0, 0.8, 0.1)
-            margen = st.number_input("Margen NAME sobre NAMO (m)", 0.0, 2.0, 0.3, 0.1)
+            _man_m = st.checkbox("Capturar manualmente el margen (bordo libre) NAME sobre NAMO", value=False)
+            margen = st.number_input("Margen NAME sobre NAMO (m)", 0.0, 2.0, 0.3, 0.1) if _man_m else 0.3
         Ds = D_succ / 1000
         Fr = (Q / (math.pi * Ds ** 2 / 4)) / math.sqrt(G * Ds)
         S = Ds * (1 + 2.3 * Fr)                      # sumergencia mínima (Hydraulic Institute)
-        C_fondo = max(0.15, 0.3 * Ds)
+        C_auto = max(0.15, 0.3 * Ds)                 # automático: 0.3·D de succión, mín. 0.15 m
+        _man_c = st.checkbox(f"Capturar manualmente la separación campana–piso (automática: {C_auto:.2f} m)",
+                             value=False)
+        C_fondo = st.number_input("Separación campana–piso (m)", 0.05, 2.0, float(round(C_auto, 2)), 0.05) \
+            if _man_c else C_auto
         V_util = Q * tc * 60 / 4                     # m3  V = Q·t/4
         z_fondo = z_ground0 - prof_carc
         namino = z_fondo + C_fondo + S
@@ -1002,7 +1032,8 @@ with tabs[6]:
         t_res = st.number_input("Tiempo de almacenamiento de reserva/emergencia (h de Qmd)", 0.0, 72.0, 0.0, 1.0)
         Vres = Qmd * 3.6 * t_res
     with c2:
-        h_tq = st.number_input("Tirante útil propuesto (m)", 1.0, 15.0, 3.5, 0.5)
+        h_tq = st.number_input("Tirante útil propuesto (m)", 1.0, 15.0,
+                               float(min(max(h_llegada, 1.0), 15.0)) if cist_recibe_piso else 3.5, 0.1)
         forma = st.radio("Forma", ["Circular", "Rectangular (largo = 1.5 × ancho)"], horizontal=True)
     pct_el = 100.0
     if destino == "Cisterna + tanque elevado":
@@ -1043,7 +1074,8 @@ with tabs[6]:
 
     # ---------------- niveles de las estructuras
     st.markdown("#### Niveles de las estructuras de almacenamiento")
-    bordo = st.number_input("Bordo libre (m)", 0.2, 2.0, 0.5, 0.1)
+    _man_b = st.checkbox("Capturar manualmente el bordo libre (por defecto 0.50 m)", value=False)
+    bordo = st.number_input("Bordo libre (m)", 0.1, 3.0, 0.5, 0.05) if _man_b else 0.5
 
     def estr_(nombre, namo, z_t, recibe=False):
         return dict(nombre=nombre, z_t=z_t, fondo=namo - h_tq, namin=namo - h_tq, namo=namo,
@@ -1055,17 +1087,25 @@ with tabs[6]:
               "Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}[destino]
         ESTR.append(estr_(nm, z_dest, z_end, True))
     else:
-        ESTR.append(estr_(llega_en, z_dest, z_end, True))
+        ESTR.append(estr_("Cisterna (sobre terreno, tipo piso)" if cist_recibe_piso else llega_en,
+                          z_dest, z_end, True))
         otro = "Cisterna" if llega_en == "Tanque elevado" else "Tanque elevado"
         if otro == "Cisterna":
-            prof_ci = st.number_input("Profundidad del fondo de la cisterna bajo el terreno (m)", 0.0, 15.0,
-                                      float(h_tq), 0.5)
-            ESTR.append(estr_("Cisterna", z_end - prof_ci + h_tq, z_end))
+            if cist_piso:
+                st.caption("Cisterna sobre el terreno (tipo piso): fondo a nivel de terreno, sin excavación.")
+                ESTR.append(estr_("Cisterna (sobre terreno, tipo piso)", z_end + h_tq, z_end))
+            else:
+                prof_ci = st.number_input("Profundidad del fondo de la cisterna bajo el terreno (m)", 0.0, 15.0,
+                                          float(h_tq), 0.5)
+                ESTR.append(estr_("Cisterna", z_end - prof_ci + h_tq, z_end))
         else:
             torre = st.number_input("Altura del fondo del tanque elevado sobre el terreno (m)", 0.0, 60.0, 12.0, 1.0)
             ESTR.append(estr_("Tanque elevado", z_end + torre + h_tq, z_end))
         st.caption("La línea descarga en la primera estructura; la segunda se ubica en el mismo sitio. "
                    "El rebombeo entre ambas no se calcula en esta app.")
+    if cist_recibe_piso and abs(z_dest - h_tq - z_end) > 0.05:
+        st.warning(f"Cisterna sobre el terreno (sin excavación): el fondo debe quedar a nivel de terreno. "
+                   f"Ajusta h en Datos ≈ tirante útil ({h_tq:.2f} m) o el tirante ≈ h ({h_llegada:.2f} m).")
     cn1, cn2 = st.columns([1.2, 1])
     fig_t = fig_tanques(ESTR)
     cn1.pyplot(fig_t)
@@ -1081,6 +1121,20 @@ with tabs[6]:
         elif rel < -0.05:
             cn2.caption(f"{e['nombre']}: semienterrado, fondo {abs(rel):.1f} m bajo el terreno.")
     SHEETS["Niveles_tanques"] = ndf
+    TABLAS_DOC.append(("Volúmenes y dimensiones de las estructuras de almacenamiento", tdf))
+    TABLAS_DOC.append(("Niveles de las estructuras de almacenamiento", ndf))
+    _vol = dict(tq)
+    for e in ESTR:
+        _k = "Tanque elevado" if "elevado" in e["nombre"] else ("Cisterna" if "Cisterna" in e["nombre"]
+                                                                  else "Tanque de regulación")
+        _v = _vol.get(_k, 0.0)
+        _rel = e["fondo"] - e["z_t"]
+        _pos = (f"el fondo queda a {_rel:.2f} m sobre el terreno (torre o base)" if _rel > 0.05 else
+                f"el fondo queda a {abs(_rel):.2f} m bajo el terreno (semienterrado)" if _rel < -0.05 else
+                "el fondo queda a nivel de terreno (sin excavación)")
+        PARRAFOS_DOC.append(f"{e['nombre']}: volumen {_v:.1f} m³; dimensiones {dims(_v, h_tq)}; "
+                            f"cota de fondo {e['fondo']:.2f} msnm, NAMO {e['namo']:.2f} msnm, corona "
+                            f"{e['corona']:.2f} msnm; {_pos}.")
 
     # ---------------- alimentación a la red
     st.markdown("#### Alimentación a la red (se diseña con Qmh)")
@@ -1145,7 +1199,8 @@ with tabs[7]:
                        "resumen_bombeo.csv")
     try:
         docx_bytes = build_docx(resumen, list(dict.fromkeys(ALERTAS)), FIGS,
-                                f"Memoria técnica descriptiva - {proyecto}")
+                                f"Memoria técnica descriptiva - {proyecto}",
+                                tablas=TABLAS_DOC, parrafos=PARRAFOS_DOC)
         c3.download_button("Descargar memoria Word", docx_bytes, "memoria_bombeo.docx",
                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     except ImportError:
