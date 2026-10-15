@@ -342,7 +342,38 @@ def draw_tanque(ax, s):
     if abs(z_t - fo) > 0.05 * yr:
         items.append((z_t, f"Terreno {z_t:.2f}", C_TERR))
     _etiquetas(ax, items, 7, 8.2, yr)
-    ax.set_title(s["nombre"], fontsize=9)
+    ax.set_title(s["nombre"] + (f"\n(×{s['n']} unidades, mismo nivel)" if s.get("n", 1) > 1 else ""), fontsize=9)
+
+
+def fig_planta(items, forma):
+    """items: [(nombre, n_unidades, area_por_unidad_m2)] -> planta a escala."""
+    fig, ax = plt.subplots(figsize=(8, 2.8))
+    x, ymax = 0.0, 0.0
+    for nombre, n, A in items:
+        if forma == "Circular":
+            w = h = math.sqrt(4 * A / math.pi)
+            lab = f"{n} × Ø {w:.2f} m"
+        else:
+            h = math.sqrt(A / 1.5)
+            w = 1.5 * h
+            lab = f"{n} × {w:.2f} × {h:.2f} m"
+        x0 = x
+        for _ in range(n):
+            if forma == "Circular":
+                ax.add_patch(plt.Circle((x + w / 2, h / 2), w / 2, fc=C_AGUA, ec="k"))
+            else:
+                ax.add_patch(Rectangle((x, 0), w, h, fc=C_AGUA, ec="k"))
+            x += w * 1.08
+        ax.text((x0 + x - 0.08 * w) / 2, -0.15 * h, f"{nombre}\n{lab}", ha="center", va="top", fontsize=7)
+        ymax = max(ymax, h)
+        x += 0.6 * w
+    ax.set_xlim(-0.05 * x, x)
+    ax.set_ylim(-0.8 * ymax, 1.15 * ymax)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title("Planta de las estructuras (a escala)", fontsize=9)
+    fig.tight_layout()
+    return fig
 
 
 def fig_pozo(d):
@@ -926,7 +957,18 @@ with tabs[3]:
     add("Accesorios", "DN válvula de desagüe", d_drain, "mm")
 
 # ------------------------------------------------------------------ 5 HIDRÁULICA
-res = hidraulica(prof, cover, D, Q, eps, Chw, metodo, acc, z_dest)
+# Envejecimiento de la tubería (parámetros editables al final de la pestaña 5; se leen del estado)
+_plast = mat_name in ("PVC hidráulico", "PEAD (polietileno AD)", "PRFV (fibra de vidrio)")
+ALFA_DEF, DC_DEF = (0.005, 5.0) if _plast else (0.05, 15.0)   # valores de referencia editables (verificar)
+age_anios = st.session_state.get("age_anios", 20)
+age_alfa = st.session_state.get(f"age_alfa_{mat_name}", ALFA_DEF)
+age_dc = st.session_state.get(f"age_dc_{mat_name}", DC_DEF)
+eps_env = eps + age_alfa * age_anios                # ε(t) = ε0 + α·t
+C_env = Chw * (1 - age_dc / 100.0)                  # C envejecido
+cond_dis = st.session_state.get("cond_diseno", "Tubería nueva")
+res_new = hidraulica(prof, cover, D, Q, eps, Chw, metodo, acc, z_dest)
+res_old = hidraulica(prof, cover, D, Q, eps_env, C_env, metodo, acc, z_dest)
+res = res_old if cond_dis.endswith("envejecida") else res_new
 TDH_max = res["H0"] - z_low + h_col
 TDH_min = res["H0"] - z_high + h_col
 pot = potencia(Q, TDH_max, eta_b, eta_m, fs)
@@ -938,6 +980,8 @@ pn_sel = next((p for p in PN_KGCM2 if p * 10 >= P_surge), PN_KGCM2[-1])
 hi_r, lo_r = puntos_alto_bajo(res["zp"])
 
 with tabs[4]:
+    st.caption(f"Condición de la tubería usada en estos cálculos: **{cond_dis}** "
+               "(se cambia en «Datos para la selección de la bomba», al final de esta pestaña).")
     c = st.columns(5)
     c[0].metric("Longitud (m)", f"{res['L']:.1f}")
     c[1].metric("Σ hf fricción (m)", f"{res['hf']:.2f}")
@@ -1043,12 +1087,15 @@ with tabs[6]:
     add("Tanques", "Volumen de regulación", Vreg, "m³")
     add("Tanques", "Volumen de reserva", Vres, "m³")
 
-    def dims(V, h):
-        A = V / h
+    def dims(V, h, n=1):
+        """Dimensiones de UNA unidad (volumen V/n y tirante h)."""
+        A = (V / n) / h
         if forma == "Circular":
-            return f"Ø {math.sqrt(4 * A / math.pi):.2f} m × {h} m"
-        b = math.sqrt(A / 1.5)
-        return f"{1.5 * b:.2f} × {b:.2f} m × {h} m"
+            txt = f"Ø {math.sqrt(4 * A / math.pi):.2f} m × {h:.2f} m"
+        else:
+            b_ = math.sqrt(A / 1.5)
+            txt = f"{1.5 * b_:.2f} × {b_:.2f} m × {h:.2f} m"
+        return f"{n} × ({txt})" if n > 1 else txt
 
     tq = []
     if destino == "Cisterna + tanque elevado":
@@ -1061,13 +1108,68 @@ with tabs[6]:
         tq = [("Cisterna", Vreg + Vres)]
     else:
         tq = [("Tanque de regulación", Vreg + Vres)]
+
+    # ---------------- división en varias unidades (opcional)
+    st.markdown("#### División en varias unidades (opcional)")
+    V_ref = st.number_input("Volumen de referencia por unidad (m³) solo para sugerir la división "
+                            "[criterio del proyectista]", 50.0, 50000.0, 1000.0, 50.0)
+    N_UN = {}
+    for (n_, v_), col_ in zip(tq, st.columns(len(tq))):
+        sug = max(1, math.ceil(v_ / V_ref))
+        N_UN[n_] = int(col_.number_input(f"Unidades de: {n_}", 1, 20, 1, 1, key=f"nu_{n_}"))
+        col_.caption(f"Volumen total {v_:.1f} m³ → " +
+                     (f"se sugiere dividir en {sug} unidades" if sug > 1 else "una unidad es suficiente"))
+
+    # ---------------- igualar planta de cisterna y tanque (opcional)
+    H_U = {n_: h_tq for n_, _ in tq}
+    igualar = False
+    if len(tq) == 2:
+        st.markdown("#### Igualar la planta de cisterna y tanque (opcional)")
+        igualar = st.checkbox("Igualar la sección en planta (para colocar la cisterna bajo el tanque o hacer "
+                              "una sola estructura). Por defecto quedan separados.", value=False)
+        if igualar:
+            if N_UN[tq[0][0]] != N_UN[tq[1][0]]:
+                st.warning("Las estructuras tienen distinto número de unidades; para apilarlas usa el mismo número.")
+            modo_ig = st.radio("Planta común", ["Tomar la de la estructura de mayor volumen",
+                                                 "Capturar diámetro (circular) o ancho (rectangular)"],
+                               horizontal=True)
+            A0 = max((v_ / N_UN[n_]) / h_tq for n_, v_ in tq)
+            if modo_ig.startswith("Tomar"):
+                A_c = A0
+            elif forma == "Circular":
+                d_c = st.number_input("Diámetro común (m)", 1.0, 80.0,
+                                      float(min(max(round(math.sqrt(4 * A0 / math.pi), 1), 1.0), 80.0)), 0.1)
+                A_c = math.pi * d_c ** 2 / 4
+            else:
+                b_c = st.number_input("Ancho común (m); largo = 1.5 × ancho", 1.0, 60.0,
+                                      float(min(max(round(math.sqrt(A0 / 1.5), 1), 1.0), 60.0)), 0.1)
+                A_c = 1.5 * b_c ** 2
+            for n_, v_ in tq:
+                H_U[n_] = (v_ / N_UN[n_]) / A_c
+            st.write("Tirantes resultantes con la planta común: " +
+                     "; ".join(f"**{n_}**: {H_U[n_]:.2f} m" for n_, _ in tq) +
+                     f". Planta por unidad: {A_c:.1f} m².")
+            if any(H_U[n_] < 1.0 or H_U[n_] > 10.0 for n_, _ in tq):
+                st.warning("Algún tirante queda fuera de 1.0–10.0 m (referencia); revisa la viabilidad constructiva.")
+
     rows_t = []
     for n_, v_ in tq:
-        rows_t.append([n_, round(v_, 1), dims(v_, h_tq), "Reg. + reserva" if n_ != "Tanque elevado" else "Regulación"])
+        n_u, h_i = N_UN[n_], H_U[n_]
+        rows_t.append([n_, round(v_, 1), n_u, round(v_ / n_u, 1), dims(v_, h_i, n_u),
+                       "Reg. + reserva" if n_ != "Tanque elevado" else "Regulación"])
         add("Tanques", f"{n_} - volumen", v_, "m³")
-        add("Tanques", f"{n_} - dimensiones", dims(v_, h_tq))
-    tdf = pd.DataFrame(rows_t, columns=["Estructura", "Volumen (m³)", "Dimensiones", "Contenido"])
+        add("Tanques", f"{n_} - dimensiones", dims(v_, h_i, n_u))
+        if n_u > 1:
+            add("Tanques", f"{n_} - unidades", n_u)
+            add("Tanques", f"{n_} - volumen por unidad", v_ / n_u, "m³")
+    tdf = pd.DataFrame(rows_t, columns=["Estructura", "Volumen (m³)", "Unidades", "Volumen por unidad (m³)",
+                                        "Dimensiones", "Contenido"])
     st.dataframe(tdf, width="stretch")
+    fig_pl = fig_planta([(n_, N_UN[n_], (v_ / N_UN[n_]) / H_U[n_]) for n_, v_ in tq], forma)
+    st.pyplot(fig_pl)
+    FIGS.append(("Figura. Planta de las estructuras de almacenamiento.", fig_pl))
+    if igualar:
+        st.success("Plantas iguales: la cisterna puede alojarse bajo el tanque o formar una sola estructura.")
     st.info("Ajusta volúmenes comerciales/constructivos. Reserva contra incendio y emergencia: "
             "definir según lineamientos del organismo operador.")
     SHEETS["Tanques"] = tdf
@@ -1077,9 +1179,17 @@ with tabs[6]:
     _man_b = st.checkbox("Capturar manualmente el bordo libre (por defecto 0.50 m)", value=False)
     bordo = st.number_input("Bordo libre (m)", 0.1, 3.0, 0.5, 0.05) if _man_b else 0.5
 
+    def _key(nombre):
+        return "Tanque elevado" if "elevado" in nombre else ("Cisterna" if "Cisterna" in nombre
+                                                              else "Tanque de regulación")
+
     def estr_(nombre, namo, z_t, recibe=False):
-        return dict(nombre=nombre, z_t=z_t, fondo=namo - h_tq, namin=namo - h_tq, namo=namo,
-                    corona=namo + bordo, recibe=recibe)
+        k_ = _key(nombre)
+        h_i = H_U.get(k_, h_tq)
+        return dict(nombre=nombre, z_t=z_t, fondo=namo - h_i, namin=namo - h_i, namo=namo,
+                    corona=namo + bordo, recibe=recibe, h=h_i, n=N_UN.get(k_, 1))
+
+    hC, hE = H_U.get("Cisterna", h_tq), H_U.get("Tanque elevado", h_tq)
 
     ESTR = []
     if destino != "Cisterna + tanque elevado":
@@ -1093,26 +1203,27 @@ with tabs[6]:
         if otro == "Cisterna":
             if cist_piso:
                 st.caption("Cisterna sobre el terreno (tipo piso): fondo a nivel de terreno, sin excavación.")
-                ESTR.append(estr_("Cisterna (sobre terreno, tipo piso)", z_end + h_tq, z_end))
+                ESTR.append(estr_("Cisterna (sobre terreno, tipo piso)", z_end + hC, z_end))
             else:
                 prof_ci = st.number_input("Profundidad del fondo de la cisterna bajo el terreno (m)", 0.0, 15.0,
-                                          float(h_tq), 0.5)
-                ESTR.append(estr_("Cisterna", z_end - prof_ci + h_tq, z_end))
+                                          float(min(hC, 15.0)), 0.5)
+                ESTR.append(estr_("Cisterna", z_end - prof_ci + hC, z_end))
         else:
             torre = st.number_input("Altura del fondo del tanque elevado sobre el terreno (m)", 0.0, 60.0, 12.0, 1.0)
-            ESTR.append(estr_("Tanque elevado", z_end + torre + h_tq, z_end))
+            ESTR.append(estr_("Tanque elevado", z_end + torre + hE, z_end))
         st.caption("La línea descarga en la primera estructura; la segunda se ubica en el mismo sitio. "
                    "El rebombeo entre ambas no se calcula en esta app.")
-    if cist_recibe_piso and abs(z_dest - h_tq - z_end) > 0.05:
+    if cist_recibe_piso and abs(ESTR[0]["fondo"] - z_end) > 0.05:
         st.warning(f"Cisterna sobre el terreno (sin excavación): el fondo debe quedar a nivel de terreno. "
-                   f"Ajusta h en Datos ≈ tirante útil ({h_tq:.2f} m) o el tirante ≈ h ({h_llegada:.2f} m).")
+                   f"Ajusta h en Datos ≈ tirante útil ({ESTR[0]['h']:.2f} m) o el tirante ≈ h ({h_llegada:.2f} m).")
     cn1, cn2 = st.columns([1.2, 1])
     fig_t = fig_tanques(ESTR)
     cn1.pyplot(fig_t)
     FIGS.append(("Figura. Niveles de las estructuras de almacenamiento.", fig_t))
-    ndf = pd.DataFrame([[e["nombre"], e["fondo"], e["namo"], e["corona"], e["fondo"] - e["z_t"]] for e in ESTR],
+    ndf = pd.DataFrame([[e["nombre"], e["fondo"], e["namo"], e["corona"], e["fondo"] - e["z_t"], e["n"], e["h"]]
+                        for e in ESTR],
                        columns=["Estructura", "Fondo = NAMIN (msnm)", "NAMO (msnm)", "Corona (msnm)",
-                                "Fondo sobre(+)/bajo(−) terreno (m)"]).round(2)
+                                "Fondo sobre(+)/bajo(−) terreno (m)", "Unidades", "Tirante útil (m)"]).round(2)
     cn2.dataframe(ndf, hide_index=True, width="stretch")
     for e in ESTR:
         rel = e["fondo"] - e["z_t"]
@@ -1132,7 +1243,9 @@ with tabs[6]:
         _pos = (f"el fondo queda a {_rel:.2f} m sobre el terreno (torre o base)" if _rel > 0.05 else
                 f"el fondo queda a {abs(_rel):.2f} m bajo el terreno (semienterrado)" if _rel < -0.05 else
                 "el fondo queda a nivel de terreno (sin excavación)")
-        PARRAFOS_DOC.append(f"{e['nombre']}: volumen {_v:.1f} m³; dimensiones {dims(_v, h_tq)}; "
+        PARRAFOS_DOC.append(f"{e['nombre']}: volumen {_v:.1f} m³"
+                            + (f" ({e['n']} unidades de {_v / e['n']:.1f} m³ c/u)" if e["n"] > 1 else "")
+                            + f"; dimensiones {dims(_v, e['h'], e['n'])}; "
                             f"cota de fondo {e['fondo']:.2f} msnm, NAMO {e['namo']:.2f} msnm, corona "
                             f"{e['corona']:.2f} msnm; {_pos}.")
 
@@ -1171,7 +1284,7 @@ with tabs[4]:
     ]
     for e in ESTR:
         NIV += [("Destino", f"{e['nombre']}: fondo = NAMIN", e["fondo"], f"{e['fondo'] - e['z_t']:+.2f} m respecto al terreno"),
-                ("Destino", f"{e['nombre']}: NAMO", e["namo"], f"Tirante útil {h_tq:.2f} m"),
+                ("Destino", f"{e['nombre']}: NAMO", e["namo"], f"Tirante útil {e['h']:.2f} m" + (f"; {e['n']} unidades" if e["n"] > 1 else "")),
                 ("Destino", f"{e['nombre']}: corona", e["corona"], f"NAMO + bordo libre {bordo:.2f} m")]
     nivdf = pd.DataFrame(NIV, columns=["Grupo", "Elemento", "Cota (msnm)", "Referencia"])
     nivdf["Cota (msnm)"] = nivdf["Cota (msnm)"].astype(float).round(2)
@@ -1180,6 +1293,162 @@ with tabs[4]:
     SHEETS["Niveles"] = nivdf
     for _, r_ in nivdf.iterrows():
         add("Niveles: " + r_["Grupo"], r_["Elemento"], float(r_["Cota (msnm)"]), "msnm")
+
+# ------------------------------------------------------------------ 5c DATOS PARA LA SELECCIÓN DE LA BOMBA
+HV_T = [5, 10, 15, 20, 25, 30, 35, 40, 50]
+HV_M = [0.09, 0.12, 0.17, 0.24, 0.32, 0.43, 0.57, 0.75, 1.26]     # presión de vapor del agua (m.c.a.)
+
+with tabs[4]:
+    st.markdown("---")
+    st.subheader("Datos para la selección de la bomba")
+
+    # ---- 1. tubería nueva vs envejecida
+    st.markdown("##### 1. Tubería nueva vs. envejecida")
+    st.caption("Los cálculos base usan tubería nueva. Aquí se verifica la envejecida con ε(t) = ε₀ + α·t "
+               "(Darcy-Weisbach) o con C reducido (Hazen-Williams). Los valores por defecto son de referencia: "
+               "ajústalos con el criterio de MAPAS / calidad del agua.")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.number_input("Años de servicio considerados", 0, 60, 20, 1, key="age_anios")
+    a2.number_input("Incremento anual de rugosidad α (mm/año)", 0.0, 1.0, ALFA_DEF, 0.01,
+                    key=f"age_alfa_{mat_name}", format="%.3f")
+    a3.number_input("Reducción de C Hazen-Williams (%)", 0.0, 50.0, DC_DEF, 1.0, key=f"age_dc_{mat_name}")
+    a4.radio("Dimensionar la bomba con:", ["Tubería nueva", "Tubería envejecida"], key="cond_diseno")
+    filas = []
+    for etq, rr, e_, c_ in [("Nueva", res_new, eps, Chw), ("Envejecida", res_old, eps_env, C_env)]:
+        for niv, zs in [("Nivel mínimo (ND / NAMINO)", z_low), ("Nivel máximo (NE / NAMO)", z_high)]:
+            H_ = rr["H0"] - zs + h_col
+            p_ = potencia(Q, H_, eta_b, eta_m, fs)
+            filas.append([etq, niv, round(e_, 4), round(c_, 1), round(rr["hf"], 2), round(H_, 2),
+                          round(p_["p_eje"], 2), round(p_["p_eje"] / 0.7457, 1), round(p_["hp_req"], 1),
+                          p_["hp_com"], round(p_["p_elec"], 2)])
+    if metodo.startswith("Darcy") and age_alfa * age_anios <= 0:
+        st.info("Con α = 0 o 0 años la rugosidad envejecida es igual a la nueva (Darcy-Weisbach): no habrá diferencia.")
+    dfc = pd.DataFrame(filas, columns=["Tubería", "Nivel de la fuente", "ε (mm)", "C (H-W)", "hf línea (m)",
+                                       "CDT (m)", "Potencia al freno BHP (kW)", "BHP (HP)",
+                                       "Motor requerido (HP)", "Motor comercial (HP)", "Potencia eléctrica (kW)"])
+    st.dataframe(dfc, hide_index=True, width="stretch")
+    H_n = res_new["H0"] - z_low + h_col
+    H_o = res_old["H0"] - z_low + h_col
+    st.write(f"Con tubería envejecida ({age_anios} años) la CDT máxima pasa de **{H_n:.2f} m** a **{H_o:.2f} m** "
+             f"(+{H_o - H_n:.2f} m, {100 * (H_o - H_n) / H_n:.1f} %). Condición de dimensionamiento actual: **{cond_dis}**.")
+    SHEETS["Bomba_nueva_vs_envejecida"] = dfc
+    TABLAS_DOC.append(("Bomba: tubería nueva vs. envejecida", dfc[["Tubería", "Nivel de la fuente", "CDT (m)",
+                       "Potencia al freno BHP (kW)", "Motor comercial (HP)"]]))
+    add("Bomba (selección)", "Condición de dimensionamiento", cond_dis)
+    add("Bomba (selección)", "Años de servicio / α / reducción de C", f"{age_anios} / {age_alfa} mm/año / {age_dc} %")
+    add("Bomba (selección)", "CDT máx. tubería nueva", H_n, "m")
+    add("Bomba (selección)", "CDT máx. tubería envejecida", H_o, "m")
+
+    # ---- 2. potencia al freno
+    st.markdown("##### 2. Potencia al freno (BHP) y datos eléctricos")
+    st.caption("Potencia al freno = potencia al eje de la bomba = ρ·g·Q·CDT / η_bomba (condición de diseño).")
+    e1, e2, _e3 = st.columns(3)
+    volt = e1.number_input("Tensión de alimentación (V, trifásica)", 100, 13800, 440, 10)
+    fp = e2.number_input("Factor de potencia del motor", 0.5, 1.0, 0.85, 0.01)
+    bhp_kw = pot["p_eje"]
+    hp_com_kw = pot["hp_com"] * 0.7457
+    I_a = pot["p_elec"] * 1000 / (math.sqrt(3) * volt * fp)
+    kwh_m3 = pot["p_elec"] / (Qlps * 3.6)
+    dfp = pd.DataFrame([
+        ["Caudal de diseño Qb", f"{Qlps:.2f} l/s = {Qlps * 3.6:.1f} m³/h", ""],
+        ["CDT de diseño (máxima)", round(TDH_max, 2), "m"],
+        ["Potencia hidráulica", round(pot["ph"], 2), "kW"],
+        ["Potencia al freno BHP", f"{bhp_kw:.2f} kW = {bhp_kw / 0.7457:.1f} HP", ""],
+        ["Motor requerido (con factor de servicio)", round(pot["hp_req"], 1), "HP"],
+        ["Motor comercial", f"{pot['hp_com']} HP = {hp_com_kw:.1f} kW", ""],
+        ["Eficiencia global bomba × motor", round(eta_b * eta_m, 3), ""],
+        ["Potencia eléctrica demandada", round(pot["p_elec"], 2), "kW"],
+        ["Corriente estimada", round(I_a, 1), "A"],
+        ["Consumo específico de energía", round(kwh_m3, 3), "kWh/m³"],
+    ], columns=["Concepto", "Valor", "Unidad"])
+    st.dataframe(dfp.astype({"Valor": str}), hide_index=True, width="stretch")
+    for _, r_ in dfp.iterrows():
+        add("Bomba (selección)", r_["Concepto"], r_["Valor"], r_["Unidad"])
+
+    # ---- 3. NPSH
+    st.markdown("##### 3. Carga neta de succión positiva (NPSH)")
+    if equipo.startswith("Centrífuga"):
+        st.info("Aplica y es crítica: NPSH disponible ≥ NPSH requerido + margen (centrífuga en cárcamo seco o sobre el nivel del agua).")
+    else:
+        st.info("Bomba sumergida / turbina vertical: el impulsor trabaja ahogado y el NPSH rara vez es crítico; "
+                "se controla con la sumergencia mínima, pero conviene verificar el NPSHr del primer impulsor.")
+    z_agua_min = FUENTE_D.get("z_nda", FUENTE_D.get("namino", z_low))
+    n1, n2, n3 = st.columns(3)
+    temp = n1.number_input("Temperatura del agua (°C)", 0.0, 60.0, 20.0, 1.0)
+    alt = n2.number_input("Altitud del sitio (msnm)", -100.0, 5000.0, float(round(z_ground0)), 10.0)
+    z_eje = n3.number_input("Cota del eje / primer impulsor (msnm)", -1000.0, 6000.0,
+                            float(round(FUENTE_D["z_succ"], 2)), 0.1)
+    n4, n5, n6 = st.columns(3)
+    hfs = n4.number_input("Pérdidas en la succión hfs (m)", 0.0, 10.0,
+                          0.3 if fuente == "Pozo profundo" else float(min(h_col, 10.0)), 0.1)
+    npshr = n5.number_input("NPSHr del catálogo a Qb (m); 0 si aún no lo tienes", 0.0, 100.0, 0.0, 0.1)
+    marg = n6.number_input("Margen de seguridad (m) [referencia]", 0.0, 5.0, 0.6, 0.1)
+    h_atm = 10.33 * (1 - 2.25577e-5 * alt) ** 5.25588
+    h_vap = float(np.interp(temp, HV_T, HV_M))
+    hs = z_eje - z_agua_min                  # + bomba sobre el agua / − bomba ahogada
+    npshd = h_atm - h_vap - hs - hfs
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Presión atmosférica (m.c.a.)", f"{h_atm:.2f}")
+    m2.metric("Presión de vapor (m.c.a.)", f"{h_vap:.2f}")
+    m3.metric("Altura estática de succión hs (m)", f"{hs:+.2f}")
+    m4.metric("NPSH disponible (m)", f"{npshd:.2f}")
+    st.caption(f"NPSHd = Hatm − Hv − hs − hfs. Nivel mínimo del agua usado: {z_agua_min:.2f} msnm; "
+               "hs > 0 si el eje queda sobre el agua, hs < 0 si la bomba está ahogada.")
+    veredicto = "Captura el NPSHr del catálogo para verificar"
+    if npshr > 0:
+        req = npshr + marg
+        hs_max = h_atm - h_vap - hfs - req
+        if npshd >= req:
+            st.success(f"CUMPLE: NPSHd {npshd:.2f} m ≥ NPSHr + margen = {req:.2f} m. "
+                       f"Altura estática de succión máxima admisible ≈ {hs_max:+.2f} m.")
+            veredicto = "Cumple"
+        else:
+            st.error(f"NO CUMPLE: NPSHd {npshd:.2f} m < NPSHr + margen = {req:.2f} m. Baja el eje de la bomba, "
+                     f"reduce pérdidas en la succión o elige otra bomba (hs máx. admisible ≈ {hs_max:+.2f} m).")
+            ALERTAS.append(f"NPSH disponible ({npshd:.2f} m) menor que NPSHr + margen ({req:.2f} m).")
+            veredicto = "No cumple"
+    for k_, v_, u_ in [("Presión atmosférica (altitud)", h_atm, "m.c.a."), ("Presión de vapor", h_vap, "m.c.a."),
+                       ("Nivel mínimo del agua en la succión", z_agua_min, "msnm"), ("Cota eje / primer impulsor", z_eje, "msnm"),
+                       ("Altura estática de succión hs", hs, "m"), ("Pérdidas en succión hfs", hfs, "m"),
+                       ("NPSH disponible", npshd, "m"), ("NPSH requerido (catálogo)", npshr, "m"),
+                       ("Verificación NPSH", veredicto, "")]:
+        add("Bomba (NPSH)", k_, v_, u_)
+
+    # ---- 4. curva del sistema
+    st.markdown("##### 4. Curva del sistema (para superponer en la curva de la bomba)")
+    qs = np.linspace(0.4, 1.4, 11) * Qlps
+
+    def _hcol(q_m3s):
+        if fuente == "Pozo profundo":
+            return hf_pipe(q_m3s, d_col / 1000, prof_bomba, 0.15, 120, metodo) + 0.5
+        return h_col * (q_m3s / Q) ** 2
+
+    d_niv = z_high - z_low
+    curv = {"Q (l/s)": np.round(qs, 2), "Q (m³/h)": np.round(qs * 3.6, 1)}
+    for etq, e_, c_ in [("nueva", eps, Chw), ("envejecida", eps_env, C_env)]:
+        h_min = np.array([hidraulica(prof, cover, D, q_ / 1000, e_, c_, metodo, acc, z_dest)["H0"] - z_low
+                          + _hcol(q_ / 1000) for q_ in qs])
+        curv[f"CDT {etq}, nivel mín. (m)"] = np.round(h_min, 2)
+        curv[f"CDT {etq}, nivel máx. (m)"] = np.round(h_min - d_niv, 2)
+    dcv = pd.DataFrame(curv)
+    fcv, axc = plt.subplots(figsize=(8, 4))
+    axc.plot(qs, dcv.iloc[:, 2], color="navy", label="Nueva, nivel mín.")
+    axc.plot(qs, dcv.iloc[:, 3], color="navy", ls="--", label="Nueva, nivel máx.")
+    axc.plot(qs, dcv.iloc[:, 4], color="red", label="Envejecida, nivel mín.")
+    axc.plot(qs, dcv.iloc[:, 5], color="red", ls="--", label="Envejecida, nivel máx.")
+    axc.scatter([Qlps], [H_n], color="k", zorder=5, label=f"Punto de diseño ({Qlps:.1f} l/s, {H_n:.1f} m)")
+    axc.axvline(Qlps, color="gray", ls=":", lw=0.8)
+    axc.set_xlabel("Caudal (l/s)")
+    axc.set_ylabel("Carga dinámica total (m)")
+    axc.grid(alpha=0.3)
+    axc.legend(fontsize=7)
+    axc.set_title("Curvas del sistema")
+    fcv.tight_layout()
+    q1, q2 = st.columns([1.2, 1])
+    q1.pyplot(fcv)
+    q2.dataframe(dcv, hide_index=True, width="stretch")
+    FIGS.append(("Figura 4. Curvas del sistema (tubería nueva y envejecida; niveles mínimo y máximo de la fuente).", fcv))
+    SHEETS["Curva_sistema"] = dcv
 
 # ------------------------------------------------------------------ 8 EXPORTAR
 with tabs[7]:
