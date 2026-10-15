@@ -1089,6 +1089,8 @@ with tabs[6]:
 
     def dims(V, h, n=1):
         """Dimensiones de UNA unidad (volumen V/n y tirante h)."""
+        if V <= 0 or h <= 0:
+            return "sin volumen (0 m³)"
         A = (V / n) / h
         if forma == "Circular":
             txt = f"Ø {math.sqrt(4 * A / math.pi):.2f} m × {h:.2f} m"
@@ -1133,7 +1135,7 @@ with tabs[6]:
             modo_ig = st.radio("Planta común", ["Tomar la de la estructura de mayor volumen",
                                                  "Capturar diámetro (circular) o ancho (rectangular)"],
                                horizontal=True)
-            A0 = max((v_ / N_UN[n_]) / h_tq for n_, v_ in tq)
+            A0 = max(max((v_ / N_UN[n_]) / h_tq for n_, v_ in tq), 1.0)
             if modo_ig.startswith("Tomar"):
                 A_c = A0
             elif forma == "Circular":
@@ -1145,11 +1147,14 @@ with tabs[6]:
                                       float(min(max(round(math.sqrt(A0 / 1.5), 1), 1.0), 60.0)), 0.1)
                 A_c = 1.5 * b_c ** 2
             for n_, v_ in tq:
-                H_U[n_] = (v_ / N_UN[n_]) / A_c
+                H_U[n_] = (v_ / N_UN[n_]) / A_c if v_ > 0 else h_tq
+            if any(v_ <= 0 for _, v_ in tq):
+                st.info("Una de las estructuras tiene volumen 0 m³ (revisa el % en el tanque elevado o la reserva): "
+                        "no se le ajusta el tirante.")
             st.write("Tirantes resultantes con la planta común: " +
                      "; ".join(f"**{n_}**: {H_U[n_]:.2f} m" for n_, _ in tq) +
                      f". Planta por unidad: {A_c:.1f} m².")
-            if any(H_U[n_] < 1.0 or H_U[n_] > 10.0 for n_, _ in tq):
+            if any((H_U[n_] < 1.0 or H_U[n_] > 10.0) for n_, v_ in tq if v_ > 0):
                 st.warning("Algún tirante queda fuera de 1.0–10.0 m (referencia); revisa la viabilidad constructiva.")
 
     rows_t = []
@@ -1165,9 +1170,11 @@ with tabs[6]:
     tdf = pd.DataFrame(rows_t, columns=["Estructura", "Volumen (m³)", "Unidades", "Volumen por unidad (m³)",
                                         "Dimensiones", "Contenido"])
     st.dataframe(tdf, width="stretch")
-    fig_pl = fig_planta([(n_, N_UN[n_], (v_ / N_UN[n_]) / H_U[n_]) for n_, v_ in tq], forma)
-    st.pyplot(fig_pl)
-    FIGS.append(("Figura. Planta de las estructuras de almacenamiento.", fig_pl))
+    _it = [(n_, N_UN[n_], (v_ / N_UN[n_]) / H_U[n_]) for n_, v_ in tq if v_ > 0 and H_U[n_] > 0]
+    if _it:
+        fig_pl = fig_planta(_it, forma)
+        st.pyplot(fig_pl)
+        FIGS.append(("Figura. Planta de las estructuras de almacenamiento.", fig_pl))
     if igualar:
         st.success("Plantas iguales: la cisterna puede alojarse bajo el tanque o formar una sola estructura.")
     st.info("Ajusta volúmenes comerciales/constructivos. Reserva contra incendio y emergencia: "
