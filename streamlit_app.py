@@ -11,8 +11,11 @@ IMPORTANTE: todas las tablas precargadas (rugosidades, K, coeficientes de regula
 tiempos de ciclo, etc.) son VALORES DE REFERENCIA EDITABLES. Verifica cada uno
 contra la edición vigente del manual MAPAS antes de emitir una memoria oficial.
 """
+import csv
 import io
 import math
+import re
+import textwrap
 import datetime as dt
 
 import numpy as np
@@ -111,23 +114,116 @@ def commercial_up(x_mm, lst=DN_COMERCIALES):
 
 
 def parse_ch(v):
-    if isinstance(v, str):
-        s = v.strip().replace(" ", "")
-        if "+" in s:
-            a, b = s.split("+")
-            return float(a) * 1000 + float(b.replace(",", "."))
-        return float(s.replace(",", "."))
-    return float(v)
+    """Cadenamiento a metros: acepta 1250, '1250,5' o '1+250'. NaN si no es válido."""
+    try:
+        if isinstance(v, str):
+            t = v.strip().replace(" ", "")
+            if "+" in t:
+                km, m = t.split("+")
+                return float(km.replace(",", "")) * 1000 + float(m.replace(",", "."))
+            return float(t.replace(",", "."))
+        return float(v)
+    except (ValueError, TypeError):
+        return float("nan")
 
 
-def read_profile(file):
-    name = file.name.lower()
-    df = pd.read_csv(file) if name.endswith(".csv") else pd.read_excel(file)
-    cols = {c: str(c).lower() for c in df.columns}
-    c_ch = next((c for c, l in cols.items() if "cad" in l or "km" in l or "dist" in l), df.columns[0])
-    c_z = next((c for c, l in cols.items() if "cota" in l or "elev" in l or l == "z"), df.columns[1])
-    out = pd.DataFrame({"ch": df[c_ch].map(parse_ch), "z": pd.to_numeric(df[c_z])})
-    return out.dropna().sort_values("ch").reset_index(drop=True)
+def _num(v):
+    """Número desde texto con coma decimal o separador de miles; NaN si no es numérico."""
+    if v is None:
+        return float("nan")
+    if isinstance(v, (int, float, np.number)):
+        return float(v)
+    t = str(v).strip().replace(" ", "").replace("\u00a0", "")
+    if not t:
+        return float("nan")
+    if "," in t and "." in t:
+        t = t.replace(",", "")           # 2,240.50
+    elif "," in t:
+        t = t.replace(",", ".")          # 2240,50
+    try:
+        return float(t)
+    except ValueError:
+        return float("nan")
+
+
+def read_table(file):
+    """Lee CSV (separador y codificación automáticos) o Excel, ubicando la fila de encabezado
+    aunque haya títulos arriba. Todo se lee como texto; la conversión numérica se hace después."""
+    raw = file.getvalue() if hasattr(file, "getvalue") else file.read()
+    if file.name.lower().endswith(".csv"):
+        try:
+            txt = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            txt = raw.decode("latin-1")
+        lines = [ln for ln in txt.splitlines() if ln.strip()]
+        sample = lines[:40]
+        delim = ","
+        for d in (";", "\t", "|"):
+            if sample and sum(d in ln for ln in sample) >= len(sample):
+                delim = d
+                break
+        rows = list(csv.reader(lines, delimiter=delim))
+        w = max(len(r) for r in rows)
+        raw_df = pd.DataFrame([r + [""] * (w - len(r)) for r in rows])
+    else:
+        raw_df = pd.read_excel(io.BytesIO(raw), header=None, dtype=str).fillna("")
+    raw_df = raw_df.astype(str)
+    raw_df = raw_df[~(raw_df.apply(lambda c: c.str.strip()) == "").all(axis=1)].reset_index(drop=True)
+    h = 0
+    for i in range(min(len(raw_df), 25)):
+        vals = [v.lower() for v in raw_df.iloc[i].tolist()]
+        if any(w_ in v for v in vals for w_ in ("cad", "cota", "elev", "km", "dist", "estac")):
+            h = i
+            break
+    names, seen = [], {}
+    for j, v in enumerate(raw_df.iloc[h].tolist()):
+        v = v.strip() or f"columna {j + 1}"
+        seen[v] = seen.get(v, 0) + 1
+        names.append(v if seen[v] == 1 else f"{v} ({seen[v]})")
+    df = raw_df.iloc[h + 1:].reset_index(drop=True)
+    df.columns = names
+    return df
+
+
+def read_profile(file, kind="terreno", key="prf"):
+    """Perfil (cadenamiento, cota). Detecta columnas, deja elegirlas y omite filas no numéricas.
+    Devuelve DataFrame (ch, z) o None si no hay datos válidos."""
+    try:
+        df = read_table(file)
+    except Exception as ex:
+        st.error(f"No se pudo leer el archivo: {ex}")
+        return None
+    cols = list(df.columns)
+    low = {c: str(c).lower() for c in cols}
+
+    def pick(words, exclude=()):
+        for c, l in low.items():
+            if any(w in l for w in words) and not any(x in l for x in exclude):
+                return c
+        return None
+
+    c_ch = pick(["cad", "km", "dist", "estac"]) or cols[0]
+    if kind == "tuberia":
+        c_z = (pick(["tub", "rasante", "proyecto", "clave", "lomo", "eje", "plantilla"])
+               or pick(["cota", "elev"], exclude=["terreno", "natural"]))
+    else:
+        c_z = pick(["terreno", "natural"]) or pick(["cota", "elev"]) or pick(["z"])
+    if c_z is None or c_z == c_ch:
+        c_z = next((c for c in cols if c != c_ch), cols[0])
+    k1, k2 = st.columns(2)
+    c_ch = k1.selectbox(f"Columna de cadenamiento ({kind})", cols, index=cols.index(c_ch), key=f"{key}_ch")
+    c_z = k2.selectbox(f"Columna de cota ({kind})", cols, index=cols.index(c_z), key=f"{key}_z")
+    out = pd.DataFrame({"ch": df[c_ch].map(parse_ch), "z": df[c_z].map(_num)})
+    malas = int(out.isna().any(axis=1).sum())
+    out = out.dropna().sort_values("ch").reset_index(drop=True)
+    if malas:
+        st.warning(f"Se omitieron {malas} fila(s) sin valor numérico en «{c_ch}» o «{c_z}» "
+                   "(encabezados repetidos, unidades, celdas vacías o texto).")
+    if len(out) < 2:
+        st.error(f"Con las columnas «{c_ch}» y «{c_z}» no hay al menos 2 filas numéricas. "
+                 "Elige otras columnas o revisa el archivo.")
+        return None
+    return out
 
 
 def demo_profile():
@@ -267,10 +363,10 @@ def _etiquetas(ax, items, x_line, x_text, yr, fs=6.5):
         ax.text(x_text, yp, t, va="center", ha="left", fontsize=fs, color=c)
 
 
-def draw_pozo(ax, d):
+def draw_pozo(ax, d, fs=6.5, xmax=20):
     top, bot = d["z_t"], d["z_bomba"]
     yr = max(top - bot, 1.0)
-    ax.set_xlim(0, 20)
+    ax.set_xlim(0, xmax)
     ax.set_ylim(bot - 0.12 * yr, top + 0.12 * yr)
     ax.axis("off")
     ax.fill_between([0, 6.8], [top, top], [bot - 0.12 * yr] * 2, color=C_SUELO)
@@ -285,14 +381,14 @@ def draw_pozo(ax, d):
                     (d["z_nd"], f"ND {d['z_nd']:.2f}", "#08519c"),
                     (d["z_nda"], f"ND + abatim. {d['z_nda']:.2f}", "#08306b"),
                     (d["z_succ"], f"Succión bomba {d['z_succ']:.2f}", "k"),
-                    (bot, f"Colocación (c/holgura) {bot:.2f}", "gray")], 6, 7.2, yr)
-    ax.set_title("Pozo profundo (corte)", fontsize=9)
+                    (bot, f"Colocación (c/holgura) {bot:.2f}", "gray")], 6, 7.2, yr, fs)
+    ax.set_title("Pozo profundo (corte)", fontsize=fs + 2.5)
 
 
-def draw_carcamo(ax, d):
+def draw_carcamo(ax, d, fs=6.5, xmax=20):
     top, bot = d["z_t"], d["z_fondo"]
     yr = max(top - bot, 1.0)
-    ax.set_xlim(0, 20)
+    ax.set_xlim(0, xmax)
     ax.set_ylim(bot - 0.12 * yr, top + 0.15 * yr)
     ax.axis("off")
     ax.fill_between([0, 9.9], [bot - 0.12 * yr] * 2, [bot] * 2, color=C_SUELO)
@@ -305,44 +401,56 @@ def draw_carcamo(ax, d):
     ax.add_patch(Rectangle((3, d["namino"]), 6, d["namo"] - d["namino"], fc=C_AGUA_U, ec="none", zorder=3))
     ax.add_patch(Rectangle((5.2, bot + 0.01 * yr), 1.2, (d["z_succ"] - bot) + 0.10 * yr, fc="gray", ec="k", zorder=4))
     ax.plot([5.8, 5.8], [d["z_succ"] + 0.10 * yr, top + 0.05 * yr], color="k", lw=2.5, zorder=4)
-    ax.text(6.0, (d["namino"] + d["namo"]) / 2, "Vol. útil", fontsize=6, ha="left", va="center",
-            color="white", zorder=5)
+    if fs < 8:
+        ax.text(6.0, (d["namino"] + d["namo"]) / 2, "Vol. útil", fontsize=fs - 0.5, ha="left", va="center",
+                color="white", zorder=5)
     _etiquetas(ax, [(top, f"Terreno {top:.2f}", C_TERR),
                     (d["name"], f"NAME {d['name']:.2f}", "#b30000"),
                     (d["namo"], f"NAMO (arranque) {d['namo']:.2f}", "#08519c"),
                     (d["namino"], f"NAMINO (paro) {d['namino']:.2f}", "#08306b"),
                     (d["z_succ"], f"Succión bomba {d['z_succ']:.2f}", "k"),
-                    (bot, f"Fondo {bot:.2f}", "gray")], 9, 10.2, yr)
-    ax.set_title("Cárcamo de bombeo (corte)", fontsize=9)
+                    (bot, f"Fondo {bot:.2f}", "gray")], 9, 10.2, yr, fs)
+    ax.set_title("Cárcamo de bombeo (corte)", fontsize=fs + 2.5)
 
 
-def draw_tanque(ax, s):
+def draw_tanque(ax, s, fs=6.5, xmax=20, lab_der=False):
     z_t, fo, no, co = s["z_t"], s["fondo"], s["namo"], s["corona"]
     lo = min(fo, z_t)
     yr = max(co - lo, 1.0)
-    ax.set_xlim(0, 20)
+    ax.set_xlim(0, xmax)
     ax.set_ylim(lo - 0.18 * yr, co + 0.22 * yr)
     ax.axis("off")
     ax.fill_between([0, 7.5], [z_t] * 2, [lo - 0.18 * yr] * 2, color=C_SUELO)
     ax.plot([0, 7.5], [z_t, z_t], color=C_TERR, lw=2)
-    elevado = fo > z_t + 0.02 * yr
-    if elevado:
+    extra = []
+    elevado = fo > z_t + 0.02 * yr or (s.get("base_h", 0) > 0 and fo > z_t + 1e-6)
+    if elevado and s.get("base_tipo") == "Firme de concreto":
+        ax.add_patch(Rectangle((2.6, z_t), 5.0, fo - z_t, fc="#bdbdbd", ec="k", lw=1.0, zorder=2))
+        if lab_der:
+            extra.append(((z_t + fo) / 2, f"Firme de concreto {fo - z_t:.2f} m", "#555555"))
+        else:
+            ax.text(0.2, (z_t + fo) / 2, f"Firme de concreto\n{fo - z_t:.2f} m", fontsize=fs, va="center")
+    elif elevado:
         for x in (3.4, 6.6):
             ax.plot([x, x], [z_t, fo], color="k", lw=2.5)
         ax.plot([3.4, 6.6], [z_t, fo], color="k", lw=0.8)
         ax.plot([6.6, 3.4], [z_t, fo], color="k", lw=0.8)
-        ax.text(0.2, (z_t + fo) / 2, f"Torre\n{fo - z_t:.1f} m", fontsize=6.5, va="center")
+        if lab_der:
+            extra.append(((z_t + fo) / 2, f"{s.get('base_tipo') or 'Torre'} {fo - z_t:.2f} m", "#555555"))
+        else:
+            ax.text(0.2, (z_t + fo) / 2, f"{s.get('base_tipo') or 'Torre'}\n{fo - z_t:.2f} m", fontsize=fs, va="center")
     ax.add_patch(Rectangle((3, fo), 4, co - fo, fc="white", ec="k", lw=1.5, zorder=3))
     ax.add_patch(Rectangle((3, fo), 4, no - fo, fc=C_AGUA_U, ec="none", zorder=4))
     if s.get("recibe"):
         ax.annotate("Llegada\nde la línea", xy=(3.0, no + 0.05 * yr), xytext=(0.1, co + 0.10 * yr),
-                    fontsize=6.5, arrowprops=dict(arrowstyle="->", color="navy"), color="navy")
+                    fontsize=fs, arrowprops=dict(arrowstyle="->", color="navy"), color="navy")
     items = [(co, f"Corona {co:.2f}", "#b30000"), (no, f"NAMO {no:.2f}", "#08519c"),
              (fo, f"Fondo = NAMIN {fo:.2f}", "#08306b")]
     if abs(z_t - fo) > 0.05 * yr:
         items.append((z_t, f"Terreno {z_t:.2f}", C_TERR))
-    _etiquetas(ax, items, 7, 8.2, yr)
-    ax.set_title(s["nombre"] + (f"\n(×{s['n']} unidades, mismo nivel)" if s.get("n", 1) > 1 else ""), fontsize=9)
+    items += extra
+    _etiquetas(ax, items, 7, 8.2, yr, fs)
+    ax.set_title(s["nombre"] + (f"\n(×{s['n']} unidades, mismo nivel)" if s.get("n", 1) > 1 else ""), fontsize=fs + 2.5)
 
 
 def fig_planta(items, forma):
@@ -471,6 +579,108 @@ def fig_sistema(fd, res, estr):
     return fig
 
 
+EXE_NAVY, EXE_TEAL, EXE_ORANGE, EXE_RED, EXE_GRAY = "#0B3C5D", "#1D7A8C", "#E07A1F", "#C0392B", "#5F6B76"
+
+
+def fig_sistema_exec(fd, res, estr, info, size=(13.333, 7.5), fscale=1.0, kpi=True, titulo=True):
+    """Versión ejecutiva del esquema general (para diapositivas): texto grande, paleta sobria,
+    encabezados por bloque y franja de datos clave."""
+    fs = 10.0 * fscale
+    W = size[0]
+    fig = plt.figure(figsize=size)
+    left, right, gap = 0.035, 0.985, 0.016
+    top_y = 0.80 if titulo else 0.90
+    bot_y = 0.215 if kpi else 0.08
+    ratios = ([1.5, 2.0] + [1.0] * len(estr)) if W >= 12 else ([1.4, 1.7] + [1.2] * len(estr))
+    total = (right - left) - gap * (len(ratios) - 1)
+    boxes, x = [], left
+    for r in ratios:
+        w = total * r / sum(ratios)
+        boxes.append((x, w))
+        x += w + gap
+    axs = [fig.add_axes([x0, bot_y, w, top_y - bot_y]) for x0, w in boxes]
+    heads = [f"1 · Fuente: {info['fuente']}", "2 · Línea de conducción"] + \
+            [f"{3 + i} · {e['nombre']}" + (f" (×{e['n']})" if e.get("n", 1) > 1 else "") for i, e in enumerate(estr)]
+    for (x0, w), h_ in zip(boxes, heads):
+        fig.add_artist(Rectangle((x0, top_y + 0.008), w, 0.052, transform=fig.transFigure, fc=EXE_NAVY, ec="none"))
+        cpl = max(int(w * W * 72 * 0.92 / (0.60 * 1.2 * fs)), 8)
+        lines_ = textwrap.wrap(h_, cpl) or [h_]
+        fig.text(x0 + w / 2, top_y + 0.034, "\n".join(lines_), ha="center", va="center", color="white",
+                 fontsize=(1.2 if len(lines_) == 1 else 0.95) * fs, fontweight="bold", linespacing=1.1)
+    if titulo:
+        fst = min(2.1 * fs, (right - left) * W * 72 * 0.97 / (0.60 * max(len(info["titulo"]), 1)))
+        fig.text(left, 0.968, info["titulo"], fontsize=fst, fontweight="bold", color=EXE_NAVY, va="top")
+        fig.text(left, 0.912, info["subtitulo"], fontsize=1.1 * fs, color=EXE_GRAY, va="top")
+
+    # 1) fuente
+    (draw_pozo if fd["tipo"] == "pozo" else draw_carcamo)(axs[0], fd, fs=fs, xmax=30)
+    axs[0].set_title("")
+
+    # 2) línea de conducción
+    ax = axs[1]
+    ch, zt, zp, LE = res["ch"], res["zt"], res["zp"], res["LE"]
+    span = max(LE.max() - zp.min(), 1.0)
+    lo, hi = zp.min() - 0.10 * span, LE.max() + 0.14 * span
+    ax.set_ylim(lo, hi)
+    ax.set_xlim(ch[0] - 0.02 * (ch[-1] - ch[0]), ch[-1] + 0.02 * (ch[-1] - ch[0]))
+    ax.fill_between(ch, zt, lo, color=C_SUELO, zorder=1)
+    ax.plot(ch, zt, color=C_TERR, lw=1.6, label="Terreno", zorder=2)
+    ax.plot(ch, zp, color=EXE_NAVY, lw=3.2, label="Tubería", zorder=4)
+    ax.plot(ch, LE, color=EXE_RED, lw=2.0, ls="--", label="Línea de energía", zorder=3)
+    acc_ = res["accr"]
+    for nm_, mk, col, sz, lab in [("Válvula de expulsión de aire", "*", EXE_ORANGE, 260, "Válvula de aire"),
+                                  ("Válvula de desagüe (purga)", "s", EXE_TEAL, 90, "Desagüe")]:
+        pts = acc_.loc[acc_["Elemento"] == nm_, "c"].to_numpy(float) if len(acc_) else []
+        if len(pts):
+            ax.scatter(pts, np.interp(pts, ch, zp), marker=mk, s=sz, color=col, edgecolor="k", lw=0.8,
+                       zorder=6, label=lab)
+    i_hi = int(np.argmax(zp))
+    bb = dict(boxstyle="round,pad=0.25", fc="white", ec="#C9D3DC", alpha=0.95)
+    ax.annotate(f"Bomba\nLE {LE[0]:.2f}", (ch[0], LE[0]), xytext=(10, 6), textcoords="offset points",
+                fontsize=fs, color=EXE_RED, fontweight="bold", va="bottom", bbox=bb)
+    ax.annotate(f"Punto más alto\n{zp[i_hi]:.2f} msnm (cad. {ch[i_hi]:.0f})", (ch[i_hi], zp[i_hi]),
+                xytext=(-70, -48), textcoords="offset points", fontsize=fs, color=EXE_NAVY, ha="right",
+                bbox=bb, arrowprops=dict(arrowstyle="-", color=EXE_NAVY, lw=0.8), zorder=7)
+    ax.annotate(f"Llegada\ntubería {zp[-1]:.2f}\nLE {LE[-1]:.2f}", (ch[-1], zp[-1]),
+                xytext=(-14, -66), textcoords="offset points", fontsize=fs, color=EXE_NAVY, ha="right",
+                bbox=bb, arrowprops=dict(arrowstyle="-", color=EXE_NAVY, lw=0.8), zorder=7)
+    ax.text(0.99, 0.97, info["callout"], transform=ax.transAxes, ha="right", va="top", fontsize=fs,
+            color=EXE_NAVY, bbox=dict(boxstyle="round,pad=0.45", fc="#F4F7FA", ec="#C9D3DC"), zorder=8)
+    ax.set_xlabel("Cadenamiento (m)", fontsize=fs)
+    ax.set_ylabel("Cota (msnm)", fontsize=fs)
+    ax.tick_params(labelsize=0.9 * fs)
+    ax.grid(alpha=0.25)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.legend(fontsize=0.9 * fs, loc="lower right", frameon=True, framealpha=0.95)
+
+    # 3..n) almacenamiento
+    for ax_, e in zip(axs[2:], estr):
+        draw_tanque(ax_, e, fs=fs, xmax=30 if W >= 12 else 34, lab_der=True)
+        ax_.set_title("")
+
+    # franja de datos clave
+    if kpi and info.get("kpis"):
+        axk = fig.add_axes([left, 0.035, right - left, 0.135])
+        axk.set_xlim(0, 1)
+        axk.set_ylim(0, 1)
+        axk.axis("off")
+        n = len(info["kpis"])
+        wk = 1.0 / n
+        box_in = (wk - 0.008) * (right - left) * W
+        fsv = min([1.7 * fs] + [box_in * 72 * 0.86 / (0.58 * max(len(v_), 1)) for _, v_ in info["kpis"]])
+        fsl = min([0.9 * fs] + [box_in * 72 * 0.88 / (0.56 * max(len(l_), 1)) for l_, _ in info["kpis"]])
+        for i, (lab, val) in enumerate(info["kpis"]):
+            x0 = i * wk + 0.004
+            axk.add_patch(Rectangle((x0, 0.04), wk - 0.008, 0.92, fc="#F4F7FA", ec="#D5DEE6", lw=1))
+            axk.add_patch(Rectangle((x0, 0.04), 0.005, 0.92, fc=EXE_TEAL, ec="none"))
+            axk.text(x0 + 0.014, 0.74, lab, fontsize=fsl, color=EXE_GRAY, va="center", ha="left")
+            axk.text(x0 + 0.014, 0.36, val, fontsize=fsv, color=EXE_NAVY, fontweight="bold", va="center",
+                     ha="left")
+    fig.text(right, 0.008, info.get("pie", ""), ha="right", va="bottom", fontsize=0.8 * fs, color=EXE_GRAY)
+    return fig
+
+
 # ----------------------------------------------------------------------------
 # EXPORTACIÓN
 # ----------------------------------------------------------------------------
@@ -584,8 +794,10 @@ with tabs[0]:
             cist_piso = cist_tipo.startswith("Sobre")
             add("Datos", "Tipo de construcción de la cisterna", cist_tipo)
         cist_recibe_piso = cist_piso and llega_en == "Cisterna"
+        st.session_state.setdefault("h_llegada_in", 4.0)
         h_llegada = st.number_input(
-            "Altura de descarga h: nivel MÁXIMO del agua sobre el terreno final (m) — ver croquis", 0.0, 80.0, 4.0, 0.5)
+            "Altura de descarga h: nivel MÁXIMO del agua sobre el terreno final (m) — ver croquis",
+            min_value=0.0, max_value=80.0, step=0.05, key="h_llegada_in", format="%.2f")
         cover = st.number_input("Profundidad de colocación de tubería (m)", 0.0, 5.0, 1.0, 0.1)
         v_min = st.number_input("Velocidad mínima recomendada (m/s)", 0.1, 2.0, 0.6, 0.1)
         v_max = st.number_input("Velocidad máxima recomendada (m/s)", 0.5, 5.0, 2.0, 0.1)
@@ -656,18 +868,17 @@ with tabs[1]:
     st.download_button("Descargar plantilla CSV", plantilla.to_csv(index=False).encode("utf-8"),
                        "plantilla_perfil.csv")
     up = st.file_uploader("Perfil del TERRENO", type=["csv", "xlsx", "xls"], key="up_terreno")
-    if up is not None:
-        terr = read_profile(up)
-    else:
-        st.info("Usando perfil de ejemplo hasta que subas tu archivo.")
+    terr = read_profile(up, "terreno", "prf_terr") if up is not None else None
+    if terr is None:
+        st.info("Usando perfil de ejemplo hasta que subas un archivo válido.")
         terr = demo_profile()
     with st.expander("Opcional: perfil de la TUBERÍA (si ya lo tienes en el mismo formato)"):
         st.caption("Mismo formato que el terreno: Cadenamiento y Cota de tubería (rasante/eje). "
                    "Los cadenamientos pueden ser distintos a los del terreno; se interpolan. "
                    "Si no lo cargas, la tubería = terreno − profundidad de colocación.")
         up_p = st.file_uploader("Perfil de la TUBERÍA", type=["csv", "xlsx", "xls"], key="up_tuberia")
-    if up_p is not None:
-        pp = read_profile(up_p)
+        pp = read_profile(up_p, "tuberia", "prf_tub") if up_p is not None else None
+    if pp is not None:
         lo_, hi_ = float(terr["ch"].min()), float(terr["ch"].max())
         ch_all = np.union1d(terr["ch"].to_numpy(float), pp["ch"].to_numpy(float))
         ch_all = ch_all[(ch_all >= lo_) & (ch_all <= hi_)]
@@ -1198,11 +1409,39 @@ with tabs[6]:
 
     hC, hE = H_U.get("Cisterna", h_tq), H_U.get("Tanque elevado", h_tq)
 
+    def _aplicar_h(v):
+        st.session_state["h_llegada_in"] = min(max(float(v), 0.0), 80.0)
+
+    base_man, base_tipo, base_h = False, None, 0.0
+    if destino == "Tanque de regulación superficial (piso)":
+        st.markdown("#### Base del tanque de piso (opcional)")
+        base_man = st.checkbox("Proponer manualmente la altura de la base (firme de concreto o estructura de acero)",
+                               value=False, key="base_on")
+        if base_man:
+            bb1, bb2 = st.columns(2)
+            base_tipo = bb1.selectbox("Tipo de base", ["Firme de concreto", "Estructura de acero"], key="base_tipo")
+            base_h = bb2.number_input("Altura de la base sobre el terreno (m) [valor de referencia, ajústalo]",
+                                      0.0, 10.0, 0.30 if base_tipo == "Firme de concreto" else 1.50, 0.05,
+                                      key=f"base_h_{base_tipo}")
+            add("Tanques", "Base del tanque", f"{base_tipo}, {base_h:.2f} m sobre el terreno")
+
     ESTR = []
     if destino != "Cisterna + tanque elevado":
         nm = {"Tanque de regulación superficial (piso)": "Tanque de regulación (piso)",
               "Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}[destino]
-        ESTR.append(estr_(nm, z_dest, z_end, True))
+        if base_man:
+            ESTR.append(estr_(nm, z_end + base_h + H_U.get(_key(nm), h_tq), z_end, True))
+            ESTR[-1]["base_tipo"], ESTR[-1]["base_h"] = base_tipo, base_h
+            h_req = base_h + ESTR[-1]["h"]
+            if abs(h_req - h_llegada) > 0.01:
+                st.warning(f"La hidráulica usa h = {h_llegada:.2f} m (pestaña Datos), pero base + tirante = "
+                           f"{h_req:.2f} m. Para que la carga de bombeo corresponda a esta geometría, aplica el valor.")
+                st.button(f"Aplicar h = {h_req:.2f} m en Datos", on_click=_aplicar_h, args=(round(h_req, 2),),
+                          key="btn_apply_h")
+            else:
+                st.success("La altura de descarga h de Datos coincide con base + tirante.")
+        else:
+            ESTR.append(estr_(nm, z_dest, z_end, True))
     else:
         ESTR.append(estr_("Cisterna (sobre terreno, tipo piso)" if cist_recibe_piso else llega_en,
                           z_dest, z_end, True))
@@ -1247,7 +1486,7 @@ with tabs[6]:
                                                                   else "Tanque de regulación")
         _v = _vol.get(_k, 0.0)
         _rel = e["fondo"] - e["z_t"]
-        _pos = (f"el fondo queda a {_rel:.2f} m sobre el terreno (torre o base)" if _rel > 0.05 else
+        _pos = (f"el fondo queda a {_rel:.2f} m sobre el terreno ({e.get('base_tipo', 'torre o base').lower()})" if _rel > 0.05 else
                 f"el fondo queda a {abs(_rel):.2f} m bajo el terreno (semienterrado)" if _rel < -0.05 else
                 "el fondo queda a nivel de terreno (sin excavación)")
         PARRAFOS_DOC.append(f"{e['nombre']}: volumen {_v:.1f} m³"
@@ -1273,6 +1512,55 @@ with tabs[4]:
     fsys = fig_sistema(FUENTE_D, res, ESTR)
     st.pyplot(fsys)
     FIGS.append(("Figura 3. Esquema general de niveles: fuente, línea de conducción y destino.", fsys))
+
+    with st.expander("📥 Esquema ejecutivo para presentaciones (alta calidad: PNG, SVG, PDF)"):
+        st.caption("Versión rediseñada de la Figura 3: texto grande, encabezados por bloque y franja de datos clave. "
+                   "Para PowerPoint: SVG (vectorial, editable) o PNG de 300 dpi; para Keynote / Google Slides: PDF o PNG.")
+        o1, o2, o3, o4 = st.columns(4)
+        tam = o1.selectbox("Tamaño", ["Diapositiva 16:9 (13.33 × 7.5 in)", "Diapositiva 4:3 (10 × 7.5 in)",
+                                      "A4 horizontal (11.69 × 8.27 in)"], key="exe_size")
+        fesc = o2.slider("Tamaño de texto", 0.8, 1.4, 1.0, 0.05, key="exe_fs")
+        dpi_png = o3.selectbox("Resolución PNG (dpi)", [150, 200, 300], index=2, key="exe_dpi")
+        fondo = o4.selectbox("Fondo", ["Blanco", "Transparente"], key="exe_bg")
+        x1, x2, x3 = st.columns(3)
+        k_tit = x1.checkbox("Incluir título", True, key="exe_t")
+        k_kpi = x2.checkbox("Incluir franja de datos clave", True, key="exe_k")
+        svg_txt = x3.checkbox("SVG con texto editable (requiere la fuente instalada)", False, key="exe_svgtxt")
+        size_exe = {"Diapositiva 16:9 (13.33 × 7.5 in)": (13.333, 7.5), "Diapositiva 4:3 (10 × 7.5 in)": (10.0, 7.5),
+                    "A4 horizontal (11.69 × 8.27 in)": (11.69, 8.27)}[tam]
+        info_exe = dict(
+            titulo=proyecto, fuente=fuente,
+            subtitulo="Esquema general de niveles · no a escala · cotas en msnm",
+            pie=f"Memoria de línea de bombeo · {dt.date.today():%d/%m/%Y}",
+            callout=f"CDT máx. {TDH_max:.1f} m\nhf {res['hf']:.1f} m · hl {res['hl']:.1f} m\nv = {res['v']:.2f} m/s",
+            kpis=[("Caudal de bombeo", f"{Qlps:.1f} l/s"), ("Carga dinámica total", f"{TDH_max:.1f} m"),
+                  ("Motor", f"{pot['hp_com']} HP"), (f"Tubería · {mat_name}", f"Ø{DN} mm · {res['L'] / 1000:.2f} km"),
+                  ("Presión máx. de diseño", f"{P_surge / 10:.1f} kg/cm²"),
+                  ("Almacenamiento", f"{tdf['Volumen (m³)'].sum():.0f} m³")])
+        fex = fig_sistema_exec(FUENTE_D, res, ESTR, info_exe, size=size_exe, fscale=fesc, kpi=k_kpi, titulo=k_tit)
+        _prev = io.BytesIO()
+        fex.savefig(_prev, format="png", dpi=110)
+        st.image(_prev)
+        if st.button("Preparar archivos de alta calidad (PNG / SVG / PDF)", key="exe_prep"):
+            with st.spinner("Generando archivos…"):
+                files_exe = {}
+                with plt.rc_context({"svg.fonttype": "none" if svg_txt else "path", "pdf.fonttype": 42}):
+                    for ext_, kw_ in [("png", dict(dpi=dpi_png)), ("svg", {}), ("pdf", {})]:
+                        bio_ = io.BytesIO()
+                        fex.savefig(bio_, format=ext_, transparent=(fondo == "Transparente"), **kw_)
+                        files_exe[ext_] = bio_.getvalue()
+                st.session_state["exe_files"] = files_exe
+        plt.close(fex)
+        if "exe_files" in st.session_state:
+            slug_ = re.sub(r"[^A-Za-z0-9_-]+", "_", proyecto).strip("_") or "esquema"
+            d1, d2, d3 = st.columns(3)
+            d1.download_button("Descargar PNG", st.session_state["exe_files"]["png"],
+                               f"esquema_niveles_{slug_}.png", "image/png", key="dl_exe_png")
+            d2.download_button("Descargar SVG (vectorial)", st.session_state["exe_files"]["svg"],
+                               f"esquema_niveles_{slug_}.svg", "image/svg+xml", key="dl_exe_svg")
+            d3.download_button("Descargar PDF (vectorial)", st.session_state["exe_files"]["pdf"],
+                               f"esquema_niveles_{slug_}.pdf", "application/pdf", key="dl_exe_pdf")
+            st.caption("Si cambiaste datos u opciones, vuelve a pulsar «Preparar archivos».")
     i_hi = int(np.argmax(res["zp"]))
     i_lo = int(np.argmin(res["zp"]))
     NIV = [("Fuente", e_, c_, r_) for e_, c_, r_ in NIV_FUENTE]
