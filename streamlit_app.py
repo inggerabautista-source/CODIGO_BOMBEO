@@ -582,7 +582,8 @@ def fig_sistema(fd, res, estr):
 EXE_NAVY, EXE_TEAL, EXE_ORANGE, EXE_RED, EXE_GRAY = "#0B3C5D", "#1D7A8C", "#E07A1F", "#C0392B", "#5F6B76"
 
 
-def fig_sistema_exec(fd, res, estr, info, size=(13.333, 7.5), fscale=1.0, kpi=True, titulo=True):
+def fig_sistema_exec(fd, res, estr, info, size=(13.333, 7.5), fscale=1.0, kpi=True, titulo=True,
+                     show_alto=False, show_llegada=False):
     """Versión ejecutiva del esquema general (para diapositivas): texto grande, paleta sobria,
     encabezados por bloque y franja de datos clave."""
     fs = 10.0 * fscale
@@ -638,12 +639,14 @@ def fig_sistema_exec(fd, res, estr, info, size=(13.333, 7.5), fscale=1.0, kpi=Tr
     bb = dict(boxstyle="round,pad=0.25", fc="white", ec="#C9D3DC", alpha=0.95)
     ax.annotate(f"Bomba\nLE {LE[0]:.2f}", (ch[0], LE[0]), xytext=(10, 6), textcoords="offset points",
                 fontsize=fs, color=EXE_RED, fontweight="bold", va="bottom", bbox=bb)
-    ax.annotate(f"Punto más alto\n{zp[i_hi]:.2f} msnm (cad. {ch[i_hi]:.0f})", (ch[i_hi], zp[i_hi]),
-                xytext=(-70, -48), textcoords="offset points", fontsize=fs, color=EXE_NAVY, ha="right",
-                bbox=bb, arrowprops=dict(arrowstyle="-", color=EXE_NAVY, lw=0.8), zorder=7)
-    ax.annotate(f"Llegada\ntubería {zp[-1]:.2f}\nLE {LE[-1]:.2f}", (ch[-1], zp[-1]),
-                xytext=(-14, -66), textcoords="offset points", fontsize=fs, color=EXE_NAVY, ha="right",
-                bbox=bb, arrowprops=dict(arrowstyle="-", color=EXE_NAVY, lw=0.8), zorder=7)
+    if show_alto:
+        ax.annotate(f"Punto más alto\n{zp[i_hi]:.2f} msnm (cad. {ch[i_hi]:.0f})", (ch[i_hi], zp[i_hi]),
+                    xytext=(-70, -48), textcoords="offset points", fontsize=fs, color=EXE_NAVY, ha="right",
+                    bbox=bb, arrowprops=dict(arrowstyle="-", color=EXE_NAVY, lw=0.8), zorder=7)
+    if show_llegada:
+        ax.annotate(f"Llegada\ntubería {zp[-1]:.2f}\nLE {LE[-1]:.2f}", (ch[-1], zp[-1]),
+                    xytext=(-14, -66), textcoords="offset points", fontsize=fs, color=EXE_NAVY, ha="right",
+                    bbox=bb, arrowprops=dict(arrowstyle="-", color=EXE_NAVY, lw=0.8), zorder=7)
     ax.text(0.99, 0.97, info["callout"], transform=ax.transAxes, ha="right", va="top", fontsize=fs,
             color=EXE_NAVY, bbox=dict(boxstyle="round,pad=0.45", fc="#F4F7FA", ec="#C9D3DC"), zorder=8)
     ax.set_xlabel("Cadenamiento (m)", fontsize=fs)
@@ -1526,6 +1529,9 @@ with tabs[4]:
         k_tit = x1.checkbox("Incluir título", True, key="exe_t")
         k_kpi = x2.checkbox("Incluir franja de datos clave", True, key="exe_k")
         svg_txt = x3.checkbox("SVG con texto editable (requiere la fuente instalada)", False, key="exe_svgtxt")
+        y1, y2, _y3 = st.columns(3)
+        k_alto = y1.checkbox("Mostrar cuadro «Punto más alto» y su línea", False, key="exe_alto")
+        k_lleg = y2.checkbox("Mostrar cuadro «Llegada» y su línea", False, key="exe_lleg")
         size_exe = {"Diapositiva 16:9 (13.33 × 7.5 in)": (13.333, 7.5), "Diapositiva 4:3 (10 × 7.5 in)": (10.0, 7.5),
                     "A4 horizontal (11.69 × 8.27 in)": (11.69, 8.27)}[tam]
         info_exe = dict(
@@ -1537,7 +1543,8 @@ with tabs[4]:
                   ("Motor", f"{pot['hp_com']} HP"), (f"Tubería · {mat_name}", f"Ø{DN} mm · {res['L'] / 1000:.2f} km"),
                   ("Presión máx. de diseño", f"{P_surge / 10:.1f} kg/cm²"),
                   ("Almacenamiento", f"{tdf['Volumen (m³)'].sum():.0f} m³")])
-        fex = fig_sistema_exec(FUENTE_D, res, ESTR, info_exe, size=size_exe, fscale=fesc, kpi=k_kpi, titulo=k_tit)
+        fex = fig_sistema_exec(FUENTE_D, res, ESTR, info_exe, size=size_exe, fscale=fesc, kpi=k_kpi, titulo=k_tit,
+                                 show_alto=k_alto, show_llegada=k_lleg)
         _prev = io.BytesIO()
         fex.savefig(_prev, format="png", dpi=110)
         st.image(_prev)
