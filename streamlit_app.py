@@ -169,12 +169,19 @@ def read_table(file):
         raw_df = pd.read_excel(io.BytesIO(raw), header=None, dtype=str).fillna("")
     raw_df = raw_df.astype(str)
     raw_df = raw_df[~(raw_df.apply(lambda c: c.str.strip()) == "").all(axis=1)].reset_index(drop=True)
-    h = 0
+    h, hallado = 0, False
     for i in range(min(len(raw_df), 25)):
         vals = [v.lower() for v in raw_df.iloc[i].tolist()]
         if any(w_ in v for v in vals for w_ in ("cad", "cota", "elev", "km", "dist", "estac")):
-            h = i
+            h, hallado = i, True
             break
+    if not hallado:
+        # Sin encabezado: si la primera fila ya son números (p. ej. 0+023.20 | 283.58), es un dato, no un título
+        n_num = sum(1 for v in raw_df.iloc[0].tolist() if not np.isnan(parse_ch(v)))
+        if n_num >= 2:
+            df = raw_df.copy()
+            df.columns = [f"columna {j + 1}" for j in range(df.shape[1])]
+            return df
     names, seen = [], {}
     for j, v in enumerate(raw_df.iloc[h].tolist()):
         v = v.strip() or f"columna {j + 1}"
