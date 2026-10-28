@@ -79,6 +79,11 @@ PATRON_DEMANDA = [0.45, 0.45, 0.45, 0.45, 0.45, 0.60, 0.90, 1.35, 1.50, 1.50, 1.
                   1.40, 1.40, 1.40, 1.35, 1.25, 1.20, 1.20, 1.10, 0.90, 0.70, 0.55, 0.50]
 # ^ PATRÓN GENÉRICO de ejemplo; sustituir por el de la ley de demanda del manual / local.
 
+DEST_ESTR = {"Cisterna + tanque de piso": ["Cisterna", "Tanque de piso"],
+             "Tanque de piso + tanque elevado": ["Tanque de piso", "Tanque elevado"],
+             "Cisterna + tanque de piso + tanque elevado": ["Cisterna", "Tanque de piso", "Tanque elevado"]}
+DEST_NUEVOS = list(DEST_ESTR)
+
 EQUIPOS = {
     "Pozo profundo": ["Sumergible", "Turbina vertical (flecha larga)"],
     "Cárcamo de bombeo": ["Sumergible (cárcamo húmedo)", "Centrífuga horizontal (cárcamo seco)",
@@ -524,8 +529,8 @@ def fig_descarga(destino, llega_en, h, cist_piso=False):
     ax.fill_between([0, 10], [0, 0], [-2.4, -2.4], color=C_SUELO)
     ax.plot([0, 10], [0, 0], color=C_TERR, lw=2)
     ax.text(6.9, -0.75, "Terreno final", fontsize=6.5, color=C_TERR)
-    elevado = destino == "Tanque elevado" or (destino == "Cisterna + tanque elevado" and llega_en == "Tanque elevado")
-    cist = destino == "Cisterna" or (destino == "Cisterna + tanque elevado" and llega_en == "Cisterna")
+    elevado = llega_en == "Tanque elevado"
+    cist = llega_en == "Cisterna"
     if elevado:
         for x in (3.8, 6.2):
             ax.plot([x, x], [0, 3.4], color="k", lw=2.5)
@@ -611,10 +616,15 @@ def fig_sistema_exec(fd, res, estr, info, size=(13.333, 7.5), fscale=1.0, kpi=Tr
             [f"{3 + i} · {e['nombre']}" + (f" (×{e['n']})" if e.get("n", 1) > 1 else "") for i, e in enumerate(estr)]
     for (x0, w), h_ in zip(boxes, heads):
         fig.add_artist(Rectangle((x0, top_y + 0.008), w, 0.052, transform=fig.transFigure, fc=EXE_NAVY, ec="none"))
+        h_ = h_.replace("Tanque de regulación (piso)", "Tanque de piso")
         cpl = max(int(w * W * 72 * 0.92 / (0.60 * 1.2 * fs)), 8)
         lines_ = textwrap.wrap(h_, cpl) or [h_]
+        fsh_ = (1.2 if len(lines_) == 1 else 0.95) * fs
+        if len(lines_) > 2:
+            fsh_ = 0.8 * fs
+            lines_ = textwrap.wrap(h_, max(int(w * W * 72 * 0.92 / (0.60 * fsh_)), 8)) or [h_]
         fig.text(x0 + w / 2, top_y + 0.034, "\n".join(lines_), ha="center", va="center", color="white",
-                 fontsize=(1.2 if len(lines_) == 1 else 0.95) * fs, fontweight="bold", linespacing=1.1)
+                 fontsize=fsh_, fontweight="bold", linespacing=1.1)
     if titulo:
         fst = min(2.1 * fs, (right - left) * W * 72 * 0.97 / (0.60 * max(len(info["titulo"]), 1)))
         fig.text(left, 0.968, info["titulo"], fontsize=fst, fontweight="bold", color=EXE_NAVY, va="top")
@@ -666,7 +676,8 @@ def fig_sistema_exec(fd, res, estr, info, size=(13.333, 7.5), fscale=1.0, kpi=Tr
 
     # 3..n) almacenamiento
     for ax_, e in zip(axs[2:], estr):
-        draw_tanque(ax_, e, fs=fs, xmax=30 if W >= 12 else 34, lab_der=True)
+        draw_tanque(ax_, e, fs=fs * (1.0 if len(estr) <= 2 else 0.85),
+                    xmax=(30 if W >= 12 else 34) + (6 if len(estr) >= 3 else 0), lab_der=True)
         ax_.set_title("")
 
     # franja de datos clave
@@ -792,10 +803,12 @@ with tabs[0]:
         fs = st.number_input("Factor de servicio del motor", 1.0, 1.5, 1.15, 0.05)
     with c3:
         destino = st.selectbox("Destino", ["Tanque de regulación superficial (piso)", "Tanque elevado",
-                                           "Cisterna", "Cisterna + tanque elevado"])
+                                           "Cisterna", "Cisterna + tanque elevado"] + DEST_NUEVOS)
         llega_en = {"Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}.get(destino, "Tanque de piso")
         if destino == "Cisterna + tanque elevado":
             llega_en = st.selectbox("La línea de conducción descarga en:", ["Tanque elevado", "Cisterna"])
+        elif destino in DEST_NUEVOS:
+            llega_en = st.selectbox("La línea de conducción descarga en:", DEST_ESTR[destino], key="llega_nuevo")
         cist_piso = False
         if "Cisterna" in destino:
             cist_tipo = st.selectbox("Tipo de construcción de la cisterna",
@@ -805,9 +818,27 @@ with tabs[0]:
             add("Datos", "Tipo de construcción de la cisterna", cist_tipo)
         cist_recibe_piso = cist_piso and llega_en == "Cisterna"
         st.session_state.setdefault("h_llegada_in", 4.0)
+        d_tir, caida = 3.5, 0.0
+        desg = st.checkbox("Desglosar la altura de descarga h (base/torre + tirante + caída)", value=False,
+                           key="h_desg_on")
+        if desg:
+            _lbl = {"Tanque elevado": "Altura de la torre: fondo del tanque sobre el terreno (m)",
+                    "Tanque de piso": "Altura de la base (firme o estructura) sobre el terreno (m)",
+                    "Cisterna": "Fondo de la cisterna respecto al terreno (m; negativo = enterrada)"}[llega_en]
+            _def = {"Tanque elevado": 12.0, "Tanque de piso": 0.0, "Cisterna": 0.0 if cist_piso else -3.5}[llega_en]
+            d_base = st.number_input(_lbl, -20.0, 60.0, _def, 0.05, key=f"h_d_base_{llega_en}_{int(cist_piso)}")
+            d_tir = st.number_input("Tirante máximo del agua (m)", 0.5, 20.0, 3.5, 0.05, key="h_d_tir")
+            _tll = st.selectbox("Tipo de llegada", ["Sumergida / al nivel del agua",
+                                                    "Descarga libre por arriba (caída sobre el NAMO)"], key="h_d_tll")
+            if _tll.startswith("Descarga"):
+                caida = st.number_input("Caída libre de la boca de descarga sobre el NAMO (m)", 0.0, 5.0, 0.30, 0.05,
+                                        key="h_d_caida")
+            st.session_state["h_llegada_in"] = round(d_base + d_tir + caida, 3)
+            add("Datos", "Desglose de h (base/torre + tirante + caída)",
+                f"{d_base:.2f} + {d_tir:.2f} + {caida:.2f} = {d_base + d_tir + caida:.2f} m")
         h_llegada = st.number_input(
             "Altura de descarga h: nivel MÁXIMO del agua sobre el terreno final (m) — ver croquis",
-            min_value=0.0, max_value=80.0, step=0.05, key="h_llegada_in", format="%.2f")
+            min_value=-20.0, max_value=80.0, step=0.05, key="h_llegada_in", format="%.2f", disabled=desg)
         cover = st.number_input("Profundidad de colocación de tubería (m)", 0.0, 5.0, 1.0, 0.1)
         v_min = st.number_input("Velocidad mínima recomendada (m/s)", 0.1, 2.0, 0.6, 0.1)
         v_max = st.number_input("Velocidad máxima recomendada (m/s)", 0.5, 5.0, 2.0, 0.1)
@@ -1298,11 +1329,26 @@ with tabs[6]:
         Vres = Qmd * 3.6 * t_res
     with c2:
         h_tq = st.number_input("Tirante útil propuesto (m)", 1.0, 15.0,
-                               float(min(max(h_llegada, 1.0), 15.0)) if cist_recibe_piso else 3.5, 0.1)
+                               float(min(max(h_llegada, 1.0), 15.0)) if cist_recibe_piso
+                               else (float(min(max(d_tir, 1.0), 15.0)) if desg else 3.5), 0.1)
         forma = st.radio("Forma", ["Circular", "Rectangular (largo = 1.5 × ancho)"], horizontal=True)
     pct_el = 100.0
     if destino == "Cisterna + tanque elevado":
         pct_el = st.slider("% del volumen de regulación alojado en el tanque elevado", 0, 100, 40)
+    pct_el_n, pct_pi = 0, 0
+    if destino == "Cisterna + tanque de piso":
+        pct_pi = st.slider("% del volumen de regulación alojado en el tanque de piso", 0, 100, 60, key="pct_pi")
+    elif destino == "Tanque de piso + tanque elevado":
+        pct_el_n = st.slider("% del volumen de regulación alojado en el tanque elevado", 0, 100, 40, key="pct_el_n")
+    elif destino == "Cisterna + tanque de piso + tanque elevado":
+        _s1, _s2 = st.columns(2)
+        pct_el_n = _s1.slider("% de la regulación en el tanque elevado", 0, 100, 40, key="pct_el_3")
+        pct_pi = _s2.slider("% de la regulación en el tanque de piso", 0, 100, 60, key="pct_pi_3")
+        if pct_el_n + pct_pi > 100:
+            st.error("La suma de porcentajes supera 100 %: se ajusta el del tanque de piso.")
+            pct_pi = 100 - pct_el_n
+        st.caption(f"La cisterna (almacenamiento) recibe el {100 - pct_el_n - pct_pi} % restante de la regulación "
+                   "más toda la reserva.")
     add("Tanques", "Qmd", Qmd, "l/s")
     add("Tanques", "Coeficiente de regulación", Cr, "m³/(l/s)")
     add("Tanques", "Volumen de regulación", Vreg, "m³")
@@ -1321,6 +1367,7 @@ with tabs[6]:
         return f"{n} × ({txt})" if n > 1 else txt
 
     tq = []
+    REG_K = None
     if destino == "Cisterna + tanque elevado":
         V_el = Vreg * pct_el / 100
         V_ci = Vreg - V_el + Vres
@@ -1329,6 +1376,22 @@ with tabs[6]:
         tq = [("Tanque elevado", Vreg + Vres)]
     elif destino == "Cisterna":
         tq = [("Cisterna", Vreg + Vres)]
+    elif destino == "Cisterna + tanque de piso":
+        V_pi = Vreg * pct_pi / 100
+        tq = [("Tanque de regulación", V_pi), ("Cisterna", Vreg - V_pi + Vres)]
+        REG_K = {"Tanque de regulación": V_pi, "Cisterna": Vreg - V_pi}
+    elif destino == "Tanque de piso + tanque elevado":
+        V_el = Vreg * pct_el_n / 100
+        tq = [("Tanque elevado", V_el), ("Tanque de regulación", Vreg - V_el + Vres)]
+        REG_K = {"Tanque elevado": V_el, "Tanque de regulación": Vreg - V_el}
+    elif destino == "Cisterna + tanque de piso + tanque elevado":
+        V_el, V_pi = Vreg * pct_el_n / 100, Vreg * pct_pi / 100
+        V_ci_r = Vreg - V_el - V_pi
+        tq = [("Tanque elevado", V_el), ("Tanque de regulación", V_pi), ("Cisterna", V_ci_r + Vres)]
+        REG_K = {"Tanque elevado": V_el, "Tanque de regulación": V_pi, "Cisterna": V_ci_r}
+        if V_ci_r + Vres <= 0:
+            st.info("La cisterna de almacenamiento queda en 0 m³: captura horas de reserva (arriba) o asígnale "
+                    "parte de la regulación.")
     else:
         tq = [("Tanque de regulación", Vreg + Vres)]
 
@@ -1346,17 +1409,24 @@ with tabs[6]:
     # ---------------- igualar planta de cisterna y tanque (opcional)
     H_U = {n_: h_tq for n_, _ in tq}
     igualar = False
-    if len(tq) == 2:
+    if len(tq) >= 2:
         st.markdown("#### Igualar la planta de cisterna y tanque (opcional)")
         igualar = st.checkbox("Igualar la sección en planta (para colocar la cisterna bajo el tanque o hacer "
                               "una sola estructura). Por defecto quedan separados.", value=False)
         if igualar:
-            if N_UN[tq[0][0]] != N_UN[tq[1][0]]:
+            grp = [n_ for n_, _ in tq]
+            if len(grp) > 2:
+                grp = st.multiselect("Estructuras cuya planta se iguala", grp, default=grp, key="grp_ig")
+            tq_g = [(n_, v_) for n_, v_ in tq if n_ in grp]
+            if len(tq_g) < 2:
+                st.warning("Selecciona al menos dos estructuras; se igualan todas.")
+                tq_g = list(tq)
+            if len({N_UN[n_] for n_, _ in tq_g}) > 1:
                 st.warning("Las estructuras tienen distinto número de unidades; para apilarlas usa el mismo número.")
             modo_ig = st.radio("Planta común", ["Tomar la de la estructura de mayor volumen",
                                                  "Capturar diámetro (circular) o ancho (rectangular)"],
                                horizontal=True)
-            A0 = max(max((v_ / N_UN[n_]) / h_tq for n_, v_ in tq), 1.0)
+            A0 = max(max((v_ / N_UN[n_]) / h_tq for n_, v_ in tq_g), 1.0)
             if modo_ig.startswith("Tomar"):
                 A_c = A0
             elif forma == "Circular":
@@ -1367,22 +1437,29 @@ with tabs[6]:
                 b_c = st.number_input("Ancho común (m); largo = 1.5 × ancho", 1.0, 60.0,
                                       float(min(max(round(math.sqrt(A0 / 1.5), 1), 1.0), 60.0)), 0.1)
                 A_c = 1.5 * b_c ** 2
-            for n_, v_ in tq:
+            for n_, v_ in tq_g:
                 H_U[n_] = (v_ / N_UN[n_]) / A_c if v_ > 0 else h_tq
-            if any(v_ <= 0 for _, v_ in tq):
+            if any(v_ <= 0 for _, v_ in tq_g):
                 st.info("Una de las estructuras tiene volumen 0 m³ (revisa el % en el tanque elevado o la reserva): "
                         "no se le ajusta el tirante.")
             st.write("Tirantes resultantes con la planta común: " +
-                     "; ".join(f"**{n_}**: {H_U[n_]:.2f} m" for n_, _ in tq) +
+                     "; ".join(f"**{n_}**: {H_U[n_]:.2f} m" for n_, _ in tq_g) +
                      f". Planta por unidad: {A_c:.1f} m².")
-            if any((H_U[n_] < 1.0 or H_U[n_] > 10.0) for n_, v_ in tq if v_ > 0):
+            if any((H_U[n_] < 1.0 or H_U[n_] > 10.0) for n_, v_ in tq_g if v_ > 0):
                 st.warning("Algún tirante queda fuera de 1.0–10.0 m (referencia); revisa la viabilidad constructiva.")
+
+    def _contenido(n_, v_):
+        if REG_K is None:
+            return "Reg. + reserva" if n_ != "Tanque elevado" else "Regulación"
+        r_ = REG_K.get(n_, 0.0)
+        e_ = max(v_ - r_, 0.0)
+        return "Reg. + reserva" if (r_ > 0.05 and e_ > 0.05) else ("Reserva" if e_ > 0.05 else "Regulación")
 
     rows_t = []
     for n_, v_ in tq:
         n_u, h_i = N_UN[n_], H_U[n_]
         rows_t.append([n_, round(v_, 1), n_u, round(v_ / n_u, 1), dims(v_, h_i, n_u),
-                       "Reg. + reserva" if n_ != "Tanque elevado" else "Regulación"])
+                       _contenido(n_, v_)])
         add("Tanques", f"{n_} - volumen", v_, "m³")
         add("Tanques", f"{n_} - dimensiones", dims(v_, h_i, n_u))
         if n_u > 1:
@@ -1423,7 +1500,9 @@ with tabs[6]:
         st.session_state["h_llegada_in"] = min(max(float(v), 0.0), 80.0)
 
     base_man, base_tipo, base_h = False, None, 0.0
-    if destino == "Tanque de regulación superficial (piso)":
+    hay_piso = destino == "Tanque de regulación superficial (piso)" or (
+        destino in DEST_NUEVOS and "Tanque de piso" in DEST_ESTR[destino])
+    if hay_piso:
         st.markdown("#### Base del tanque de piso (opcional)")
         base_man = st.checkbox("Proponer manualmente la altura de la base (firme de concreto o estructura de acero)",
                                value=False, key="base_on")
@@ -1436,25 +1515,67 @@ with tabs[6]:
             add("Tanques", "Base del tanque", f"{base_tipo}, {base_h:.2f} m sobre el terreno")
 
     ESTR = []
-    if destino != "Cisterna + tanque elevado":
+    if destino in DEST_NUEVOS:
+        _nom = {"Cisterna": "Cisterna (sobre terreno, tipo piso)" if cist_piso else "Cisterna",
+                "Tanque de piso": "Tanque de regulación (piso)", "Tanque elevado": "Tanque elevado"}
+        for k_ in [llega_en] + [o_ for o_ in DEST_ESTR[destino] if o_ != llega_en]:
+            nm_k = _nom[k_]
+            h_k = H_U.get(_key(nm_k), h_tq)
+            if k_ == llega_en:
+                if k_ == "Tanque de piso" and base_man:
+                    ESTR.append(estr_(nm_k, z_end + base_h + h_k, z_end, True))
+                    h_req = base_h + h_k + caida
+                    if abs(h_req - h_llegada) > 0.01:
+                        st.warning(f"La hidráulica usa h = {h_llegada:.2f} m (pestaña Datos), pero base + tirante = "
+                                   f"{h_req:.2f} m. Para que la carga de bombeo corresponda a esta geometría, aplica el valor.")
+                        if desg:
+                            st.info("El desglose de h está activo en Datos: ajusta allí la base/torre y el tirante.")
+                        else:
+                            st.button(f"Aplicar h = {h_req:.2f} m en Datos", on_click=_aplicar_h,
+                                      args=(round(h_req, 2),), key="btn_apply_h_n")
+                    else:
+                        st.success("La altura de descarga h de Datos coincide con base + tirante.")
+                else:
+                    ESTR.append(estr_(nm_k, z_dest - caida, z_end, True))
+            elif k_ == "Cisterna":
+                if cist_piso:
+                    ESTR.append(estr_(nm_k, z_end + h_k, z_end))
+                else:
+                    prof_ci = st.number_input("Profundidad del fondo de la cisterna bajo el terreno (m)", 0.0, 15.0,
+                                              float(min(h_k, 15.0)), 0.5, key="prof_ci_n")
+                    ESTR.append(estr_(nm_k, z_end - prof_ci + h_k, z_end))
+            elif k_ == "Tanque de piso":
+                ESTR.append(estr_(nm_k, z_end + (base_h if base_man else 0.0) + h_k, z_end))
+            else:
+                torre = st.number_input("Altura del fondo del tanque elevado sobre el terreno (m)", 0.0, 60.0, 12.0,
+                                        1.0, key="torre_n")
+                ESTR.append(estr_(nm_k, z_end + torre + h_k, z_end))
+            if k_ == "Tanque de piso" and base_man:
+                ESTR[-1]["base_tipo"], ESTR[-1]["base_h"] = base_tipo, base_h
+        st.caption("La línea descarga en la primera estructura. Las demás se ubican en el mismo sitio: si quedan más "
+                   "bajas se llenan por gravedad; si quedan más altas requieren rebombeo (no se calcula aquí).")
+    elif destino != "Cisterna + tanque elevado":
         nm = {"Tanque de regulación superficial (piso)": "Tanque de regulación (piso)",
               "Tanque elevado": "Tanque elevado", "Cisterna": "Cisterna"}[destino]
         if base_man:
             ESTR.append(estr_(nm, z_end + base_h + H_U.get(_key(nm), h_tq), z_end, True))
             ESTR[-1]["base_tipo"], ESTR[-1]["base_h"] = base_tipo, base_h
-            h_req = base_h + ESTR[-1]["h"]
+            h_req = base_h + ESTR[-1]["h"] + caida
             if abs(h_req - h_llegada) > 0.01:
                 st.warning(f"La hidráulica usa h = {h_llegada:.2f} m (pestaña Datos), pero base + tirante = "
                            f"{h_req:.2f} m. Para que la carga de bombeo corresponda a esta geometría, aplica el valor.")
-                st.button(f"Aplicar h = {h_req:.2f} m en Datos", on_click=_aplicar_h, args=(round(h_req, 2),),
-                          key="btn_apply_h")
+                if desg:
+                    st.info("El desglose de h está activo en Datos: ajusta allí la base/torre y el tirante.")
+                else:
+                    st.button(f"Aplicar h = {h_req:.2f} m en Datos", on_click=_aplicar_h, args=(round(h_req, 2),),
+                              key="btn_apply_h")
             else:
                 st.success("La altura de descarga h de Datos coincide con base + tirante.")
         else:
-            ESTR.append(estr_(nm, z_dest, z_end, True))
+            ESTR.append(estr_(nm, z_dest - caida, z_end, True))
     else:
         ESTR.append(estr_("Cisterna (sobre terreno, tipo piso)" if cist_recibe_piso else llega_en,
-                          z_dest, z_end, True))
+                          z_dest - caida, z_end, True))
         otro = "Cisterna" if llega_en == "Tanque elevado" else "Tanque elevado"
         if otro == "Cisterna":
             if cist_piso:
@@ -1504,6 +1625,48 @@ with tabs[6]:
                             + f"; dimensiones {dims(_v, e['h'], e['n'])}; "
                             f"cota de fondo {e['fondo']:.2f} msnm, NAMO {e['namo']:.2f} msnm, corona "
                             f"{e['corona']:.2f} msnm; {_pos}.")
+
+    # ---------------- carga de bombeo según la estructura que recibe la línea
+    st.markdown("#### Carga de bombeo según la estructura que recibe la línea")
+    with st.expander("¿Cómo se calcula la altura de llegada y la línea de energía (LE) de la bomba?"):
+        st.markdown(
+            "1. **Cota de descarga** `z_dest = terreno final + h`. La altura `h` es el nivel máximo del agua (NAMO) "
+            "sobre el terreno final: **piso** = base + tirante; **elevado** = torre + tirante; **cisterna** = fondo "
+            "(negativo si está enterrada) + tirante. Si la boca de descarga queda **sobre** el agua (caída libre), se suma "
+            "esa caída; si llega **sumergida**, no.\n"
+            "2. **LE al final** `= z_dest + K·v²/2g` (K = 1.0 de salida a tanque).\n"
+            "3. **Hacia aguas arriba:** `LE(x) = z_dest + Σhf aguas abajo + Σhl aguas abajo`.\n"
+            "4. **CDT** `= LE en la descarga de la bomba − nivel de la fuente (ND o NAMINO) + pérdidas en columna/succión`.\n\n"
+            "Como las pérdidas no dependen de `z_dest`, cambiar de estructura receptora mueve la CDT exactamente "
+            "lo que cambia su cota de descarga: un tanque elevado exige más carga que uno de piso.")
+    rec = ESTR[0]
+    perd = res["hf"] + res["hl"]
+    rows_c = []
+    for e in ESTR:
+        z_k = e["namo"] + caida
+        cdt_k = perd + z_k - z_low + h_col
+        if e is rec:
+            alim = "Recibe la línea"
+        elif e["namo"] > rec["namo"] + 0.05:
+            alim = "Más alta que la receptora: requiere rebombeo (no calculado)"
+        else:
+            alim = "Más baja: se llena por gravedad desde la receptora"
+        rows_c.append([e["nombre"], round(e["namo"], 2), round(z_k, 2), round(z_k - z_end, 2), round(cdt_k, 2),
+                       round(cdt_k - TDH_max, 2), alim])
+    dfr = pd.DataFrame(rows_c, columns=["Estructura", "NAMO (msnm)", "Cota de descarga (msnm)",
+                                        "h sobre terreno final (m)", "CDT máx. si la línea llega aquí (m)",
+                                        "Diferencia vs. CDT de diseño (m)", "Alimentación entre estructuras"])
+    st.dataframe(dfr, hide_index=True, width="stretch")
+    st.caption("La CDT de diseño corresponde a la primera fila (estructura que recibe la línea). Una diferencia distinta "
+               "de cero en esa fila indica que la h de Datos no coincide con la geometría de la estructura.")
+    SHEETS["Carga_segun_estructura"] = dfr
+    TABLAS_DOC.append(("Carga de bombeo según la estructura que recibe la línea",
+                       dfr[["Estructura", "Cota de descarga (msnm)", "CDT máx. si la línea llega aquí (m)",
+                            "Alimentación entre estructuras"]]))
+    PARRAFOS_DOC.append(f"La línea de conducción descarga en: {rec['nombre']} "
+                        f"({'descarga libre sobre el NAMO' if caida > 0 else 'llegada al nivel del agua'}). Cota de "
+                        f"descarga {z_dest:.2f} msnm = terreno final {z_end:.2f} + h {h_llegada:.2f} m; "
+                        f"carga dinámica total máxima {TDH_max:.2f} m.")
 
     # ---------------- alimentación a la red
     st.markdown("#### Alimentación a la red (se diseña con Qmh)")
@@ -1589,7 +1752,10 @@ with tabs[4]:
         ("Línea", "Punto más bajo de la tubería", res["zp"][i_lo], f"Cad. {res['ch'][i_lo]:.0f} m"),
         ("Línea", "Fin de la tubería (llegada)", res["zp"][-1], f"Cad. {res['ch'][-1]:.0f} m"),
         ("Destino", "Terreno en el punto final", z_end, "Último punto del perfil"),
-        ("Destino", "Nivel máximo de descarga (NAMO de la estructura receptora)", z_dest, f"Terreno + h = {h_llegada:.1f} m"),
+        ("Destino", "Nivel máximo de descarga (NAMO de la estructura receptora)", z_dest - caida,
+         f"Terreno + h = {h_llegada - caida:.1f} m"),
+        *([("Destino", "Cota de la boca de descarga (NAMO + caída libre)", z_dest, f"Caída libre {caida:.2f} m")]
+          if caida > 0 else []),
     ]
     for e in ESTR:
         NIV += [("Destino", f"{e['nombre']}: fondo = NAMIN", e["fondo"], f"{e['fondo'] - e['z_t']:+.2f} m respecto al terreno"),
