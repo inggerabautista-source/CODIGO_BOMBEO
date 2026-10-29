@@ -263,6 +263,10 @@ def hidraulica(prof, cover, D, Q, eps, C, method, acc, z_dest):
     accr = pd.DataFrame(rows, columns=["c", "Elemento", "n", "K", "d_mm", "v", "hl"])
     down_hf = np.array([hfs[i:].sum() for i in range(len(ch))])
     down_hl = np.array([accr.loc[accr["c"] >= c - 1e-6, "hl"].sum() for c in ch])
+    if len(down_hl):
+        # Todo accesorio está aguas abajo de la bomba: en la 1.ª estación (descarga) se cuentan TODOS, incluso los
+        # ubicados antes del primer cadenamiento del perfil (p. ej. en 0+000 con perfil que inicia en 0+023.20).
+        down_hl[0] = accr["hl"].sum()
     LE = z_dest + down_hf + down_hl
     return dict(ch=ch, zt=zt, zp=zp, Lseg=Lseg, hfs=hfs, accr=accr, LE=LE,
                 P=LE - zp, Pst=z_dest - zp, hf=hfs.sum(), hl=accr["hl"].sum(),
