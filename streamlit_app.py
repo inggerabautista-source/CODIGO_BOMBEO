@@ -259,18 +259,30 @@ def hidraulica(prof, cover, D, Q, eps, C, method, acc, z_dest):
         d = (r["Diámetro (mm)"] / 1000.0) if pd.notna(r["Diámetro (mm)"]) and r["Diámetro (mm)"] > 0 else D
         v = Q / (math.pi * d ** 2 / 4)
         rows.append(dict(c=float(r["Cadenamiento (m)"]), Elemento=r["Elemento"], n=n, K=K,
-                         d_mm=d * 1000, v=v, hl=n * K * v ** 2 / (2 * G)))
-    accr = pd.DataFrame(rows, columns=["c", "Elemento", "n", "K", "d_mm", "v", "hl"])
+                         d_mm=d * 1000, v=v, hl=n * K * v ** 2 / (2 * G),
+                         salida=(r["Elemento"] == "Salida a tanque (descarga)")))
+    accr = pd.DataFrame(rows, columns=["c", "Elemento", "n", "K", "d_mm", "v", "hl", "salida"])
+    accr["salida"] = accr["salida"].astype(bool)
+    # MAPAS-CONAGUA (Conducciones, Tabla 3.2): salida de tubería a depósito K = 1.0 -> es la carga de velocidad Hv.
+    # Se contabiliza UNA sola vez, como Hv en la llegada (no dentro de Σhl):
+    #   LE llegada = NAMO (+ caída libre) + Hv        LE bomba = LE llegada + Σhf + Σhl
+    v_l = Q / (math.pi * D ** 2 / 4)
+    sal = accr.loc[accr["salida"]]
+    ks = float((sal["n"] * sal["K"]).sum()) if len(sal) else 1.0
+    hv = ks * v_l ** 2 / (2 * G)
+    loc = accr.loc[~accr["salida"]]
     down_hf = np.array([hfs[i:].sum() for i in range(len(ch))])
-    down_hl = np.array([accr.loc[accr["c"] >= c - 1e-6, "hl"].sum() for c in ch])
+    down_hl = np.array([loc.loc[loc["c"] >= c - 1e-6, "hl"].sum() for c in ch])
     if len(down_hl):
         # Todo accesorio está aguas abajo de la bomba: en la 1.ª estación (descarga) se cuentan TODOS, incluso los
         # ubicados antes del primer cadenamiento del perfil (p. ej. en 0+000 con perfil que inicia en 0+023.20).
-        down_hl[0] = accr["hl"].sum()
-    LE = z_dest + down_hf + down_hl
+        down_hl[0] = loc["hl"].sum()
+        if len(down_hl) > 1:
+            down_hl[-1] = 0.0          # última estación = llegada: LE = NAMO + Hv
+    LE = z_dest + hv + down_hf + down_hl
     return dict(ch=ch, zt=zt, zp=zp, Lseg=Lseg, hfs=hfs, accr=accr, LE=LE,
-                P=LE - zp, Pst=z_dest - zp, hf=hfs.sum(), hl=accr["hl"].sum(),
-                H0=LE[0], L=Lseg.sum(), v=Q / (math.pi * D ** 2 / 4))
+                P=LE - zp, Pst=z_dest - zp, hf=hfs.sum(), hl=loc["hl"].sum(), hv=hv, z_dest=z_dest,
+                LE_llegada=LE[-1], H0=LE[0], L=Lseg.sum(), v=v_l)
 
 
 def puntos_alto_bajo(zp):
@@ -313,7 +325,7 @@ def fig_perfil(prof, res, acc_df, hi, lo, pn_m=None):
     a1.plot(ch, res["zt"], color="saddlebrown", lw=1.5, label="Terreno")
     a1.plot(ch, res["zp"], color="navy", lw=1.8, label="Tubería")
     a1.plot(ch, res["LE"], color="red", ls="--", lw=1.5, label="Línea de energía (bombeo)")
-    a1.axhline(res["LE"][-1] - res["accr"]["hl"].tail(1).sum() if len(res["accr"]) else res["LE"][-1],
+    a1.axhline(res.get("z_dest", res["LE"][-1]),
                color="c", lw=0.6, ls=":")
     a1.fill_between(ch, res["zt"], res["zt"].min() - 5, color="burlywood", alpha=0.3)
     if len(hi):
@@ -1250,6 +1262,8 @@ with tabs[4]:
     c[2].metric("Motor requerido HP", f"{pot['hp_req']:.1f}")
     c[3].metric("Motor comercial HP", f"{pot['hp_com']}")
     c[4].metric("Potencia eléctrica kW", f"{pot['p_elec']:.2f}")
+    st.caption("Σ hl no incluye la salida al tanque: esa pérdida (K = 1.0, MAPAS Tabla 3.2) es la carga de velocidad "
+               "Hv = v²/2g y se suma una sola vez en la llegada (ver «Balance de energía», abajo).")
     # presiones
     st.write(f"Presión máx. operación: **{P_op:.1f} m**, estática: **{P_st:.1f} m**, "
              f"sobrepresión estimada (Joukowsky, cierre instantáneo, a={a_cel} m/s): **{dH_surge:.1f} m** → "
@@ -1272,7 +1286,8 @@ with tabs[4]:
     st.dataframe(tbl, height=250)
     st.write("Pérdidas locales por accesorio")
     st.dataframe(res["accr"].rename(columns={"c": "Cad. (m)", "n": "Cant.", "d_mm": "Ø (mm)",
-                                             "v": "V (m/s)", "hl": "hl (m)"}).round(3))
+                                             "v": "V (m/s)", "hl": "hl (m)",
+                                             "salida": "Cuenta como Hv"}).round(3))
     SHEETS["Perfil_hidraulico"] = tbl
     SHEETS["Perdidas_locales"] = res["accr"].round(4)
     # costo energético
@@ -1294,7 +1309,8 @@ with tabs[4]:
     add(sec, "Velocidad", res["v"], "m/s")
     add(sec, "Longitud", res["L"], "m")
     add(sec, "Pérdidas por fricción", res["hf"], "m")
-    add(sec, "Pérdidas locales", res["hl"], "m")
+    add(sec, "Pérdidas locales (sin la salida)", res["hl"], "m")
+    add(sec, "Carga de velocidad en la llegada Hv", res["hv"], "m")
     add(sec, "Cota nivel de descarga", z_dest, "msnm")
     add(sec, "Cota nivel mínimo fuente (ND/NAMINO)", z_low, "msnm")
     add(sec, "Carga dinámica total máxima", TDH_max, "m")
@@ -1638,13 +1654,13 @@ with tabs[6]:
             "sobre el terreno final: **piso** = base + tirante; **elevado** = torre + tirante; **cisterna** = fondo "
             "(negativo si está enterrada) + tirante. Si la boca de descarga queda **sobre** el agua (caída libre), se suma "
             "esa caída; si llega **sumergida**, no.\n"
-            "2. **LE al final** `= z_dest + K·v²/2g` (K = 1.0 de salida a tanque).\n"
-            "3. **Hacia aguas arriba:** `LE(x) = z_dest + Σhf aguas abajo + Σhl aguas abajo`.\n"
+            "2. **LE de llegada** `= NAMO (+ caída) + Hv`, con `Hv = v²/2g` (equivale a la salida K = 1.0 de MAPAS, contada una vez).\n"
+            "3. **LE en la bomba** `= LE de llegada + Σhf + Σhl` (Σhl sin la salida).\n"
             "4. **CDT** `= LE en la descarga de la bomba − nivel de la fuente (ND o NAMINO) + pérdidas en columna/succión`.\n\n"
             "Como las pérdidas no dependen de `z_dest`, cambiar de estructura receptora mueve la CDT exactamente "
             "lo que cambia su cota de descarga: un tanque elevado exige más carga que uno de piso.")
     rec = ESTR[0]
-    perd = res["hf"] + res["hl"]
+    perd = res["hf"] + res["hl"] + res["hv"]
     rows_c = []
     for e in ESTR:
         z_k = e["namo"] + caida
@@ -1712,7 +1728,7 @@ with tabs[4]:
             titulo=proyecto, fuente=fuente,
             subtitulo="Esquema general de niveles · no a escala · cotas en msnm",
             pie=f"Memoria de línea de bombeo · {dt.date.today():%d/%m/%Y}",
-            callout=f"CDT máx. {TDH_max:.1f} m\nhf {res['hf']:.1f} m · hl {res['hl']:.1f} m\nv = {res['v']:.2f} m/s",
+            callout=f"CDT máx. {TDH_max:.1f} m\nhf {res['hf']:.1f} m · hl {res['hl']:.1f} m\nHv {res['hv']:.2f} m · v = {res['v']:.2f} m/s",
             kpis=[("Caudal de bombeo", f"{Qlps:.1f} l/s"), ("Carga dinámica total", f"{TDH_max:.1f} m"),
                   ("Motor", f"{pot['hp_com']} HP"), (f"Tubería · {mat_name}", f"Ø{DN} mm · {res['L'] / 1000:.2f} km"),
                   ("Presión máx. de diseño", f"{P_surge / 10:.1f} kg/cm²"),
@@ -1772,6 +1788,48 @@ with tabs[4]:
     SHEETS["Niveles"] = nivdf
     for _, r_ in nivdf.iterrows():
         add("Niveles: " + r_["Grupo"], r_["Elemento"], float(r_["Cota (msnm)"]), "msnm")
+
+# ------------------------------------------------------------------ 5d BALANCE DE ENERGÍA (LE y CDT)
+with tabs[4]:
+    st.markdown("---")
+    st.subheader("Balance de energía: LE y CDT")
+    st.caption("Ecuación de energía con bomba (MAPAS-CONAGUA, «Conducciones», Ec. 3.17): la bomba aporta la diferencia de "
+               "niveles + las pérdidas (fricción y locales, incluida la salida K = 1.0 = Hv). Aquí: LE de llegada = NAMO + Hv; "
+               "LE bomba = LE de llegada + hf + hl; CDT = LE bomba − nivel mínimo de agua en la succión + pérdidas en succión/columna.")
+    rec_b = ESTR[0]
+    if abs(rec_b["namo"] + caida - z_dest) > 0.01:
+        st.warning(f"La cota de descarga que usa la hidráulica ({z_dest:.2f}) difiere de NAMO + caída de la estructura "
+                   f"receptora ({rec_b['namo'] + caida:.2f}) en {z_dest - rec_b['namo'] - caida:+.2f} m: revisa h en Datos "
+                   "o la base/torre de la estructura.")
+    LE_ll, LE_b = res["LE_llegada"], res["H0"]
+    filas_b = [
+        ["Estructura que recibe la línea", rec_b["nombre"], ""],
+        ["NAMO de la estructura receptora", rec_b["namo"], "msnm"],
+        ["Caída libre sobre el NAMO (0 si llega sumergida)", caida, "m"],
+        ["(1) Cota de descarga = NAMO + caída", z_dest, "msnm"],
+        ["(2) Carga de velocidad Hv = K·v²/2g (K salida = 1.0)", res["hv"], "m"],
+        ["(3) LE de llegada = (1) + (2)", LE_ll, "msnm"],
+        ["(4) Pérdidas por fricción Σhf", res["hf"], "m"],
+        ["(5) Pérdidas locales Σhl (sin la salida)", res["hl"], "m"],
+        ["(6) LE en la bomba = (3) + (4) + (5)", LE_b, "msnm"],
+        ["(7) Nivel mínimo de agua en la succión (ND / NAMINO)", z_low, "msnm"],
+        ["(8) Pérdidas en succión / columna / estación", h_col, "m"],
+        ["(9) CDT máxima = (6) − (7) + (8)", TDH_max, "m"],
+        ["(10) Nivel máximo de agua en la succión (NE / NAMO)", z_high, "msnm"],
+        ["(11) CDT mínima = (6) − (10) + (8)", TDH_min, "m"],
+    ]
+    if "z_nda" in FUENTE_D:
+        filas_b.append(["(12) CDT con abatimiento adicional (ND + abatimiento)", LE_b - FUENTE_D["z_nda"] + h_col, "m"])
+    filas_b.append(["Cierre del balance: (6) − [(3) + (4) + (5)] (debe ser 0)", LE_b - (LE_ll + res["hf"] + res["hl"]), "m"])
+    dfb = pd.DataFrame([[a_, f"{b_:.3f}" if isinstance(b_, (int, float, np.floating)) else b_, c_] for a_, b_, c_ in filas_b],
+                       columns=["Concepto", "Valor", "Unidad"])
+    st.dataframe(dfb, hide_index=True, width="stretch")
+    st.caption(f"Condición de la tubería usada: {cond_dis}. Con la bomba en cárcamo, el nivel mínimo es el NAMINO; en pozo, "
+               "el nivel dinámico a Qb.")
+    SHEETS["Balance_LE_CDT"] = dfb
+    TABLAS_DOC.append(("Balance de energía (LE y CDT)", dfb))
+    for a_, b_, c_ in filas_b:
+        add("Balance LE/CDT", a_, b_, c_)
 
 # ------------------------------------------------------------------ 5c DATOS PARA LA SELECCIÓN DE LA BOMBA
 HV_T = [5, 10, 15, 20, 25, 30, 35, 40, 50]
